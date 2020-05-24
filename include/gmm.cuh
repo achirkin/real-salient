@@ -668,8 +668,7 @@ namespace gmm
 
         // calculate inverse covariance matrices and determinants.
         const int matricesPerBlock(BLOCK_SIZE / C);
-        const int covsBlocks((MK - 1) / matricesPerBlock + 1);
-        covariance_solve<C, MK><<<covsBlocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float), mainStream>>>(covs, covs_inv, covs_det);
+        covariance_solve<C, MK><<<distribute(MK, matricesPerBlock), BLOCK_SIZE, BLOCK_SIZE * sizeof(float), mainStream>>>(covs, covs_inv, covs_det);
         cudaErrorCheck(mainStream);
     }
 

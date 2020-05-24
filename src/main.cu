@@ -165,7 +165,7 @@ try
             10 /* number of iterations in EM estimation algorithm for GMMs*/,
             5 /* number of passes in CRF inference */);
 
-        draw_foreground<<<((color_N - 1) / BLOCK_SIZE + 1), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
+        draw_foreground<<<distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
         cudaErrorCheck(mainStream);
 
         cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);

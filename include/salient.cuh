@@ -145,6 +145,10 @@ namespace salient
         /** Downsampled color_H. */
         const int H;
 
+        const dim3 dimDepth;
+        const dim3 dimColor;
+        const dim3 dimWork;
+
         /** How to probe the depth frame at the position known for the color frame.  */
         const FrameTransform color2depth;
 
@@ -182,6 +186,9 @@ namespace salient
               depth_W(depthIntrinsics.width), depth_H(depthIntrinsics.height),
               W(colorIntrinsics.width / downsampleRatio),
               H(colorIntrinsics.height / downsampleRatio),
+              dimDepth(depth_W, depth_H, 1),
+              dimColor(color_W, color_H, 1),
+              dimWork(W, H, 1),
               depthArray(nullptr), depthInterpArray(nullptr), lhoodArray(nullptr),
               gmmModel(mainStream, W * H),
               crfModel(mainStream, W * H, gmmModel.logLikelihoodPtr()),
@@ -234,6 +241,11 @@ namespace salient
             const int gmmIterations = 10,
             const int crfIterations = 5);
     };
+
+    dim3 enlargeSquare(const dim3 square, const int pow2)
+    {
+        return dim3(square.x << pow2, square.y << pow2, square.z);
+    }
 
     template <int C, int GaussianK, class GetFeature>
     void RealSalient<C, GaussianK, GetFeature>::initUint16Frame(const int w, const int h, cudaArray *&array, cudaTextureObject_t *texture)
@@ -369,7 +381,7 @@ namespace salient
     void RealSalient<C, GaussianK, GetFeature>::loadDepthFrame(const uint16_t *host_depth_buffer)
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
-        dim3 blocks((depth_W - 1) / (squareBlockSize.x << X) + 1, (depth_H - 1) / (squareBlockSize.y << X) + 1, 1);
+        dim3 blocks = distribute(dimDepth, enlargeSquare(squareBlockSize, X));
 
         // Copy some data located at address h_data in host memory into CUDA array
         cudaMemcpyToArrayAsync(depthArray, 0, 0, host_depth_buffer, sizeof(uint16_t) * depth_W * depth_H, cudaMemcpyHostToDevice, mainStream);
@@ -410,8 +422,7 @@ namespace salient
     template <int C, int GaussianK, class GetFeature>
     void RealSalient<C, GaussianK, GetFeature>::loadColorFrame()
     {
-        dim3 blocks = dim3((W - 1) / squareBlockSize.x + 1, (H - 1) / squareBlockSize.y + 1, 1);
-        build_features<C, GetFeature><<<blocks, squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, gmmModel.featuresPtr(), getFeature);
+        build_features<C, GetFeature><<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, gmmModel.featuresPtr(), getFeature);
         cudaErrorCheck(mainStream);
     }
 
@@ -522,10 +533,8 @@ namespace salient
     void RealSalient<C, GaussianK, GetFeature>::buildLabels(const float depth_low, const float depth_high)
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
-        dim3 blocks = dim3((W - 1) / squareBlockSize.x + 1, (H - 1) / squareBlockSize.y + 1, 1);
-        depth_to_labels<<<blocks, squareBlockSize, 0, mainStream>>>(W, H, depthTex, depthInterpTex, gmmModel.labelsPtr(), depthScale, depth_low, depth_high, color2depth);
-        blocks = dim3((W - 1) / (squareBlockSize.x << X) + 1, (H - 1) / (squareBlockSize.y << X) + 1, 1);
-        labels_impute<X><<<blocks, squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
+        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, depthTex, depthInterpTex, gmmModel.labelsPtr(), depthScale, depth_low, depth_high, color2depth);
+        labels_impute<X><<<distribute(dimWork, enlargeSquare(squareBlockSize, X)), squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
     }
 
     template <int C, int GaussianK, class GetFeature>
@@ -600,8 +609,7 @@ namespace salient
         auto lhoodPtr = crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
         cudaMemcpyToArrayAsync(lhoodArray, 0, 0, lhoodPtr, sizeof(float) * 2 * W * H, cudaMemcpyDeviceToDevice, mainStream);
         cudaErrorCheck(mainStream);
-        dim3 blocks((color_W - 1) / squareBlockSize.x + 1, (color_H - 1) / squareBlockSize.y + 1, 1);
-        compute_probabilities<<<blocks, squareBlockSize, 0, mainStream>>>(color_W, color_H, W, H, probabilities, lhoodTex);
+        compute_probabilities<<<distribute(dimColor, squareBlockSize), squareBlockSize, 0, mainStream>>>(color_W, color_H, W, H, probabilities, lhoodTex);
         cudaErrorCheck(mainStream);
     }
 } // namespace salient

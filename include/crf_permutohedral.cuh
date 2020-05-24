@@ -244,7 +244,7 @@ namespace crf
     __host__ void HashTableGPU<T, pd, vd>::blur(MatrixEntry<T> *matrix)
     {
         const int blockSize(128);
-        const int blocks((capacity - 1) / blockSize + 1);
+        const int blocks = distribute(capacity, blockSize);
         for (int i = 0; i <= pd; i++)
         {
             blurKernel<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(matrix, i, *this);
@@ -544,10 +544,10 @@ namespace crf
         {
             filterTimes = 0;
             hashTable.clear();
-            dim3 blocks((n - 1) / BLOCK_SIZE + 1, 1, 1);
             dim3 blockSize(BLOCK_SIZE, 1, 1);
             dim3 cleanBlockSize(128, 1, 1);
-            dim3 cleanBlocks((n - 1) / cleanBlockSize.x + 1, (2 * pd + 1) / cleanBlockSize.y + 1, 1);
+            dim3 blocks = distribute(dim3(n, 1, 1), blockSize);
+            dim3 cleanBlocks = distribute(dim3(n, 2 * (pd + 1), 1), cleanBlockSize);
 
             createLattice<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(n, positions, scaleFactor, matrix, hashTable);
             cudaErrorCheck(mainStream);
@@ -559,10 +559,8 @@ namespace crf
         // values and position must already be device pointers
         void filter(T *output, const T *inputs)
         {
-            dim3 blocks((n - 1) / BLOCK_SIZE + 1, pd + 1, 1);
             dim3 blockSize(BLOCK_SIZE, 1, 1);
-            int cleanBlockSize = 128;
-            dim3 cleanBlocks((n - 1) / cleanBlockSize + 1, 2 * (pd + 1), 1);
+            dim3 blocks = distribute(dim3(n, pd + 1, 1), blockSize);
 
             cudaMemsetAsync((void *)(hashTable.values), 0, hashTable.capacity * vd * sizeof(T), mainStream);
             cudaErrorCheck(mainStream);
@@ -574,7 +572,7 @@ namespace crf
 
             hashTable.blur(matrix);
 
-            blockSize.y = 1;
+            blocks.y = 1;
             slice<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(n, output, matrix, hashTable);
             cudaErrorCheck(mainStream);
             ++filterTimes;

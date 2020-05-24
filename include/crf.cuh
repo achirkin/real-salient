@@ -105,8 +105,9 @@ namespace crf
 
         void loadImage(const float *img_features = nullptr) override
         {
-            dim3 blocks((w - 1) / 16 + 1, (h - 1) / 16 + 1, 1);
-            dim3 blockSize(16, 16, 1);
+            dim3 blockSize(32, 32, 1);
+            dim3 workSize(w, h, 1);
+            dim3 blocks = distribute(workSize, blockSize);
             assembleImageFeature<F><<<blocks, blockSize, 0, mainStream>>>(w, h, img_features, div_position, div_feature, features);
             cudaErrorCheck(mainStream);
             lattice->prepare(features); // const float *features,
@@ -115,8 +116,9 @@ namespace crf
         void apply(float *out_values, const float *in_values, float *tmp) override
         {
             lattice->filter(tmp, in_values);
-            dim3 blocks((N - 1) / BLOCK_SIZE + 1, M, 1);
             dim3 blockSize(BLOCK_SIZE, 1, 1);
+            dim3 workSize(N, M, 1);
+            dim3 blocks = distribute(workSize, blockSize);
             pottsWeight<M><<<blocks, blockSize, 0, mainStream>>>(out_values, tmp, N, weight);
             cudaErrorCheck(mainStream);
         }
@@ -248,9 +250,7 @@ namespace crf
     template <int M>
     void DenseCRF<M>::expAndNormalize(float *out, const float *in, float scale /* = 1.0 */, float relax /* = 1.0 */)
     {
-        dim3 blocks((N - 1) / BLOCK_SIZE + 1, 1, 1);
-        dim3 blockSize(BLOCK_SIZE, 1, 1);
-        expNormKernel<M><<<blocks, blockSize, 0, mainStream>>>(N, out, in, scale, relax);
+        expNormKernel<M><<<distribute(N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(N, out, in, scale, relax);
         cudaErrorCheck(mainStream);
     }
 
