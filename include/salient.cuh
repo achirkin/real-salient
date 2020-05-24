@@ -97,6 +97,8 @@ namespace salient
     class RealSalient
     {
     private:
+        const cudaStream_t mainStream;
+
         /** The block size for pre- and post-processing CUDA kernels in this class. */
         const dim3 squareBlockSize = dim3(32, 32, 1);
 
@@ -164,13 +166,15 @@ namespace salient
         float *probabilities;
 
         RealSalient(
+            const cudaStream_t mainStream,
             const CameraIntrinsics depthIntrinsics,
             const CameraIntrinsics colorIntrinsics,
             const CameraExtrinsics colorToDepthExtrinsics,
             const int downsampleRatio,
             const float depthScale,
             const GetFeature getFeature)
-            : downsampleRatio(downsampleRatio),
+            : mainStream(mainStream),
+              downsampleRatio(downsampleRatio),
               depthScale(depthScale),
               getFeature(getFeature),
               color2depth(depthIntrinsics, colorIntrinsics, colorToDepthExtrinsics, downsampleRatio),
@@ -179,18 +183,15 @@ namespace salient
               W(colorIntrinsics.width / downsampleRatio),
               H(colorIntrinsics.height / downsampleRatio),
               depthArray(nullptr), depthInterpArray(nullptr), lhoodArray(nullptr),
-              gmmModel(W * H),
-              crfModel(W * H, gmmModel.logLikelihoodPtr()),
+              gmmModel(mainStream, W * H),
+              crfModel(mainStream, W * H, gmmModel.logLikelihoodPtr()),
               probabilities(nullptr)
         {
             cudaMalloc((void **)&probabilities, sizeof(float) * color_W * color_H);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             initUint16Frame(depth_W, depth_H, depthArray, &depthTex);
-            cudaErrorCheck();
             initInterpolatedFrame<1>(depth_W, depth_H, depthInterpArray, &depthInterpTex, &depthInterpSurf);
-            cudaErrorCheck();
             initInterpolatedFrame<2>(W, H, lhoodArray, &lhoodTex, nullptr);
-            cudaErrorCheck();
 
             initModels();
         }
@@ -198,21 +199,21 @@ namespace salient
         ~RealSalient()
         {
             cudaFree(probabilities);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaDestroyTextureObject(depthInterpTex);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaDestroySurfaceObject(depthInterpSurf);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaDestroyTextureObject(depthTex);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaDestroyTextureObject(lhoodTex);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFreeArray(depthInterpArray);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFreeArray(depthArray);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFreeArray(lhoodArray);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         RealSalient(const RealSalient &o) = delete;
@@ -251,9 +252,8 @@ namespace salient
         memset(&resourceDesc, 0, sizeof(resourceDesc));
         resourceDesc.resType = cudaResourceTypeArray;
         resourceDesc.res.array.array = array;
-        cudaErrorCheck();
         cudaCreateTextureObject(texture, &resourceDesc, &texDesc, NULL);
-        cudaErrorCheck();
+        cudaErrorCheck(nullptr);
     }
 
     template <int C, int GaussianK, class GetFeature>
@@ -280,14 +280,12 @@ namespace salient
         memset(&resourceDesc, 0, sizeof(resourceDesc));
         resourceDesc.resType = cudaResourceTypeArray;
         resourceDesc.res.array.array = array;
-
-        cudaErrorCheck();
         cudaCreateTextureObject(texture, &resourceDesc, &texDesc, NULL);
-        cudaErrorCheck();
+        cudaErrorCheck(nullptr);
         if (withSurface)
         {
             cudaCreateSurfaceObject(surface, &resourceDesc);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
     }
 
@@ -374,10 +372,10 @@ namespace salient
         dim3 blocks((depth_W - 1) / (squareBlockSize.x << X) + 1, (depth_H - 1) / (squareBlockSize.y << X) + 1, 1);
 
         // Copy some data located at address h_data in host memory into CUDA array
-        cudaMemcpyToArray(depthArray, 0, 0, host_depth_buffer, sizeof(uint16_t) * depth_W * depth_H, cudaMemcpyHostToDevice);
-        cudaErrorCheck();
-        depth_interpolate<X><<<blocks, squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(float) * 4>>>(depth_W, depth_H, depthScale, depthTex, depthInterpSurf);
-        cudaErrorCheck();
+        cudaMemcpyToArrayAsync(depthArray, 0, 0, host_depth_buffer, sizeof(uint16_t) * depth_W * depth_H, cudaMemcpyHostToDevice, mainStream);
+        cudaErrorCheck(mainStream);
+        depth_interpolate<X><<<blocks, squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(float) * 4, mainStream>>>(depth_W, depth_H, depthScale, depthTex, depthInterpSurf);
+        cudaErrorCheck(mainStream);
     }
 
     template <int C, class GetFeature>
@@ -413,8 +411,8 @@ namespace salient
     void RealSalient<C, GaussianK, GetFeature>::loadColorFrame()
     {
         dim3 blocks = dim3((W - 1) / squareBlockSize.x + 1, (H - 1) / squareBlockSize.y + 1, 1);
-        build_features<C, GetFeature><<<blocks, squareBlockSize>>>(W, H, downsampleRatio, gmmModel.featuresPtr(), getFeature);
-        cudaErrorCheck();
+        build_features<C, GetFeature><<<blocks, squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, gmmModel.featuresPtr(), getFeature);
+        cudaErrorCheck(mainStream);
     }
 
     // Classes:
@@ -525,25 +523,24 @@ namespace salient
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
         dim3 blocks = dim3((W - 1) / squareBlockSize.x + 1, (H - 1) / squareBlockSize.y + 1, 1);
-        depth_to_labels<<<blocks, squareBlockSize>>>(W, H, depthTex, depthInterpTex, gmmModel.labelsPtr(), depthScale, depth_low, depth_high, color2depth);
+        depth_to_labels<<<blocks, squareBlockSize, 0, mainStream>>>(W, H, depthTex, depthInterpTex, gmmModel.labelsPtr(), depthScale, depth_low, depth_high, color2depth);
         blocks = dim3((W - 1) / (squareBlockSize.x << X) + 1, (H - 1) / (squareBlockSize.y << X) + 1, 1);
-        labels_impute<X><<<blocks, squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2>>>(W, H, gmmModel.labelsPtr());
+        labels_impute<X><<<blocks, squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
     }
 
     template <int C, int GaussianK, class GetFeature>
     void RealSalient<C, GaussianK, GetFeature>::initModels()
     {
         // add a color independent term (feature = pixel location 0..W-1, 0..H-1)
-        smoothnessPairwise = new crf::PairwisePotential<2, 2>(W, H, 3.0f, 3.0f);
+        smoothnessPairwise = new crf::PairwisePotential<2, 2>(mainStream, W, H, 3.0f, 3.0f);
         crfModel.addPairwiseEnergy(smoothnessPairwise);
         smoothnessPairwise->loadImage(); // this one does not require an image, so is initialized only once.
-        cudaErrorCheck();
 
         // add a color dependent term (feature = xyrgb)
-        appearancePairwise = new crf::PairwisePotential<2, 2 + C>(W, H, 10.0f, 40.0f, 20.0f);
+        appearancePairwise = new crf::PairwisePotential<2, 2 + C>(mainStream, W, H, 10.0f, 40.0f, 20.0f);
         crfModel.addPairwiseEnergy(appearancePairwise);
 
-        similarityPairwise = new crf::PairwisePotential<2, C>(W, H, 2.0f, 0, 100.0f);
+        similarityPairwise = new crf::PairwisePotential<2, C>(mainStream, W, H, 2.0f, 0, 100.0f);
         crfModel.addPairwiseEnergy(similarityPairwise);
     }
 
@@ -553,20 +550,15 @@ namespace salient
         if (gmmIterations > 0)
         {
             gmmModel.iterate(gmmIterations);
-            cudaErrorCheck();
         }
 
         gmmModel.infer();
-        cudaErrorCheck();
 
         if (crfIterations > 0)
         {
             appearancePairwise->loadImage(gmmModel.featuresPtr());
-            cudaErrorCheck();
             similarityPairwise->loadImage(gmmModel.featuresPtr());
-            cudaErrorCheck();
             crfModel.inference(crfIterations);
-            cudaErrorCheck();
         }
     }
 
@@ -606,10 +598,10 @@ namespace salient
         runModels(gmmIterations, crfIterations);
 
         auto lhoodPtr = crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
-        cudaMemcpyToArray(lhoodArray, 0, 0, lhoodPtr, sizeof(float) * 2 * W * H, cudaMemcpyDeviceToDevice);
-        cudaErrorCheck();
+        cudaMemcpyToArrayAsync(lhoodArray, 0, 0, lhoodPtr, sizeof(float) * 2 * W * H, cudaMemcpyDeviceToDevice, mainStream);
+        cudaErrorCheck(mainStream);
         dim3 blocks((color_W - 1) / squareBlockSize.x + 1, (color_H - 1) / squareBlockSize.y + 1, 1);
-        compute_probabilities<<<blocks, squareBlockSize>>>(color_W, color_H, W, H, probabilities, lhoodTex);
-        cudaErrorCheck();
+        compute_probabilities<<<blocks, squareBlockSize, 0, mainStream>>>(color_W, color_H, W, H, probabilities, lhoodTex);
+        cudaErrorCheck(mainStream);
     }
 } // namespace salient

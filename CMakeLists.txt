@@ -5,9 +5,6 @@ project(real-salient LANGUAGES CXX CUDA VERSION 0.1.0)
 # required for the view window only
 find_package(OpenCV REQUIRED)
 
-# enable cudaErrorCheck(), which syncs GPU and shows the last error
-add_definitions(-DCUDAERRORCHECKS)
-
 add_executable(real-salient
   src/main.cu
   include/salient.cuh
@@ -16,8 +13,9 @@ add_executable(real-salient
   include/util.hpp)
 target_include_directories(real-salient PRIVATE include)
 target_compile_options(real-salient PRIVATE
+  $<$<CONFIG:DEBUG>: -DCUDAERRORCHECKS > # enable cudaErrorCheck(), which syncs GPU and shows the last error
   $<$<COMPILE_LANGUAGE:CUDA>: --use_fast_math --extended-lambda >
-  $<$<COMPILE_LANGUAGE:CXX>: -fPIC -O3 -march=native >
+  $<$<COMPILE_LANGUAGE:CXX>: -fPIC -O3 -march=native -Wall -Wpedantic -Wextra -fexceptions >
 )
 set (CMAKE_CXX_STANDARD 14)
 #target_compile_features(real-salient PUBLIC cxx_std_14)

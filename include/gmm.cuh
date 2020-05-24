@@ -25,6 +25,8 @@ namespace gmm
     class GaussianMixtures
     {
     private:
+        const cudaStream_t mainStream;
+
         // size: N * C
         float *features;
         // size: N
@@ -92,9 +94,12 @@ namespace gmm
          * N is a runtime constant indicating the number of points.
          * 
          * @param N number of data points.
+         * @param alpha constant for smoothing the GMM parameters over time (frames).
+         * @param imputed_weight how important the imputed label values compared to real labels.
          */
-        explicit GaussianMixtures(int N, float alpha = 0.1f, float imputed_weight = 0.3f)
-            : N(N),
+        explicit GaussianMixtures(const cudaStream_t mainStream, int N, float alpha = 0.1f, float imputed_weight = 0.3f)
+            : mainStream(mainStream),
+              N(N),
               alpha(alpha),
               imputed_weight(imputed_weight),
               blocksForN((N - 1) / BLOCK_SIZE + 1),
@@ -113,6 +118,7 @@ namespace gmm
             cudaMalloc((void **)&covs_det, sizeof(float) * M * K);
             cudaMalloc((void **)&llhoods, sizeof(float) * N * M);
             cudaMalloc((void **)&aggr_temp, sizeof(float) * blockSizeForN * M * K * C * C);
+            cudaErrorCheck(nullptr);
         }
 
         ~GaussianMixtures()
@@ -130,6 +136,7 @@ namespace gmm
             cudaFree(covs_det);
             cudaFree(llhoods);
             cudaFree(aggr_temp);
+            cudaErrorCheck(nullptr);
         }
 
         GaussianMixtures(const GaussianMixtures &o) = delete;
@@ -242,8 +249,8 @@ namespace gmm
     template <int C, int K, int M>
     void GaussianMixtures<C, K, M>::expectationStep()
     {
-        expectationKernel<C, K, M><<<blocksForN, blockSizeForN>>>(N, features, labels, means, covs_inv, mixture_weights, probs_weights);
-        cudaErrorCheck();
+        expectationKernel<C, K, M><<<blocksForN, blockSizeForN, 0, mainStream>>>(N, features, labels, means, covs_inv, mixture_weights, probs_weights);
+        cudaErrorCheck(mainStream);
     }
 
     /**
@@ -598,20 +605,20 @@ namespace gmm
 
         // calculate mixture_weights
         shared_size = sizeof(float) * blockSizeForN * M;
-        maximization_aggregateWeights<K, M><<<blocks, blockSizeForN, shared_size>>>(N, labels, probs_weights, aggr_temp, imputed_weight);
+        maximization_aggregateWeights<K, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, labels, probs_weights, aggr_temp, imputed_weight);
         shared_size = sizeof(float) * blocks * M;
-        aggregateN<K, M><<<1, blocks, shared_size>>>(aggr_temp, mixture_weights);
+        aggregateN<K, M><<<1, blocks, shared_size, mainStream>>>(aggr_temp, mixture_weights);
 
         // calculate means
         shared_size = sizeof(float) * blockSizeForN * M * C;
-        maximization_aggregateMeans<C, K, M><<<blocks, blockSizeForN, shared_size>>>(N, features, labels, probs_weights, mixture_weights, aggr_temp, imputed_weight);
+        maximization_aggregateMeans<C, K, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, features, labels, probs_weights, mixture_weights, aggr_temp, imputed_weight);
         shared_size = sizeof(float) * blocks * M * C;
-        aggregateN<K, M * C><<<1, blocks, shared_size>>>(aggr_temp, means);
+        aggregateN<K, M * C><<<1, blocks, shared_size, mainStream>>>(aggr_temp, means);
 
         // fix bad components by looking for too small or repeating weights
-        cudaMemcpy(cpu_mixture_weights_temp, mixture_weights, sizeof(float) * MK, cudaMemcpyDeviceToHost);
-        cudaErrorCheck();
-
+        cudaMemcpyAsync(cpu_mixture_weights_temp, mixture_weights, sizeof(float) * MK, cudaMemcpyDeviceToHost, mainStream);
+        cudaErrorCheck(mainStream);
+        cudaStreamSynchronize(mainStream); // need to wait for this memory copy to finish.
         const float weightEps(max(1.0f, 0.001f * N / MK));
         for (int m = 0; m < M; m++)
         {
@@ -631,20 +638,20 @@ namespace gmm
                         cpu_mixture_weights_temp[mk] = weightEps;
                     // else
                     //     cpu_mixture_weights_temp[mk] /= 2;
-                    cudaMemcpy(means + mk * C, features + rand_feature * C, sizeof(float) * C, cudaMemcpyDeviceToDevice);
-                    cudaErrorCheck();
+                    cudaMemcpyAsync(means + mk * C, features + rand_feature * C, sizeof(float) * C, cudaMemcpyDeviceToDevice, mainStream);
+                    cudaErrorCheck(mainStream);
                 }
             }
         }
-        cudaMemcpy(mixture_weights, cpu_mixture_weights_temp, sizeof(float) * MK, cudaMemcpyHostToDevice);
-        cudaErrorCheck();
+        cudaMemcpyAsync(mixture_weights, cpu_mixture_weights_temp, sizeof(float) * MK, cudaMemcpyHostToDevice, mainStream);
+        cudaErrorCheck(mainStream);
 
         // calculate covariance matrices
         shared_size = sizeof(float) * blockSizeForN * M * CC;
-        maximization_aggregateCovs<C, K, M><<<blocks, blockSizeForN, shared_size>>>(N, features, labels, probs_weights, mixture_weights, means, aggr_temp, imputed_weight);
+        maximization_aggregateCovs<C, K, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, features, labels, probs_weights, mixture_weights, means, aggr_temp, imputed_weight);
         shared_size = sizeof(float) * blocks * M * CC;
-        aggregateN<K, M * CC><<<1, blocks, shared_size>>>(aggr_temp, covs);
-        cudaErrorCheck();
+        aggregateN<K, M * CC><<<1, blocks, shared_size, mainStream>>>(aggr_temp, covs);
+        cudaErrorCheck(mainStream);
 
         // update current and longterm model parameters if necessary.
         if (doMovingAverage)
@@ -652,18 +659,18 @@ namespace gmm
             int MK2 = 1;
             while (MK2 < MK)
                 MK2 <<= 1;
-            maximization_doMovingAverage<C><<<1, MK2>>>(MK, alpha,
-                                                        mixture_weights, mixture_weights_longterm,
-                                                        means, means_longterm,
-                                                        covs, covs_longterm);
+            maximization_doMovingAverage<C><<<1, MK2, 0, mainStream>>>(MK, alpha,
+                                                                       mixture_weights, mixture_weights_longterm,
+                                                                       means, means_longterm,
+                                                                       covs, covs_longterm);
+            cudaErrorCheck(mainStream);
         }
-        cudaErrorCheck();
 
         // calculate inverse covariance matrices and determinants.
         const int matricesPerBlock(BLOCK_SIZE / C);
         const int covsBlocks((MK - 1) / matricesPerBlock + 1);
-        covariance_solve<C, MK><<<covsBlocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(covs, covs_inv, covs_det);
-        cudaErrorCheck();
+        covariance_solve<C, MK><<<covsBlocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float), mainStream>>>(covs, covs_inv, covs_det);
+        cudaErrorCheck(mainStream);
     }
 
     template <int C, int M>
@@ -825,13 +832,13 @@ namespace gmm
         const int blocks(min(N, blockSizeForN)); // make sure there are less than blockSizeForN blocks
         int shared_size;
         shared_size = sizeof(float) * blockSizeForN * M * C * 2;
-        initModels_minmax1<C, M><<<blocks, blockSizeForN, shared_size>>>(N, features, labels, aggr_temp);
-        cudaErrorCheck();
+        initModels_minmax1<C, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, features, labels, aggr_temp);
+        cudaErrorCheck(mainStream);
         shared_size = sizeof(float) * blocks * M * C * 2;
-        initModels_minmax2<C, M><<<1, blocks, shared_size>>>(aggr_temp);
-        cudaErrorCheck();
-        initModelsKernel<C, K, M><<<1, BLOCK_SIZE>>>(aggr_temp, mixture_weights, means, covs_inv, covs_det);
-        cudaErrorCheck();
+        initModels_minmax2<C, M><<<1, blocks, shared_size, mainStream>>>(aggr_temp);
+        cudaErrorCheck(mainStream);
+        initModelsKernel<C, K, M><<<1, BLOCK_SIZE, 0, mainStream>>>(aggr_temp, mixture_weights, means, covs_inv, covs_det);
+        cudaErrorCheck(mainStream);
     }
 
     template <int C, int K, int M>
@@ -895,7 +902,7 @@ namespace gmm
     template <int C, int K, int M>
     void GaussianMixtures<C, K, M>::infer()
     {
-        inferKernel<C, K, M><<<blocksForN, blockSizeForN>>>(N, features, labels, means, covs_inv, covs_det, llhoods);
+        inferKernel<C, K, M><<<blocksForN, blockSizeForN, 0, mainStream>>>(N, features, labels, means, covs_inv, covs_det, llhoods);
     }
 
 } // namespace gmm

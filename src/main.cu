@@ -97,13 +97,23 @@ try
     // rely on the fact that we have the same representation as librealsense
     const salient::CameraExtrinsics color2depth(*reinterpret_cast<salient::CameraExtrinsics *>(&rs2_color_to_depth));
 
+    // Select the GPU.
+    // The idea is to select a secondary, less powerfull GPU for this, so that it does not interfere with
+    // the main user activity (such as playing VR).
+    cudaSetDevice(0);
+
+    cudaStream_t mainStream;
+    cudaStreamCreate(&mainStream);
+
     // original image from the color camera
     uint8_t *yuyvGPU = nullptr;
     cudaMalloc((void **)&yuyvGPU, sizeof(uint8_t) * color_W * color_H * 2);
+    cudaErrorCheck(nullptr);
 
     // transformed RGB image with foreground mask applied
     uint8_t *rgbGPU = nullptr;
     cudaMalloc((void **)&rgbGPU, sizeof(uint8_t) * color_W * color_H * 3);
+    cudaErrorCheck(nullptr);
 
     // how to access color data at every pixel position.
     auto getFeature = [yuyvGPU, color_W] __device__(const int i, const int j, float *out_feature) {
@@ -113,7 +123,7 @@ try
         out_feature[2] = 0.5f * (float)yuyvGPU[(base_off - i % 2) * 2 + 3];
     };
     salient::RealSalient<3, 7, decltype(getFeature)> realSalient(
-        depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
+        mainStream, depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
 
     const auto window_name = "real-salient";
     namedWindow(window_name, WINDOW_AUTOSIZE);
@@ -144,8 +154,8 @@ try
         frameset data = pipe.wait_for_frames();
 
         // copy the color frame, so that getFeature gets the actual color data.
-        cudaMemcpy(yuyvGPU, data.get_color_frame().get_data(), sizeof(uint8_t) * color_N * 2, cudaMemcpyHostToDevice);
-        cudaErrorCheck();
+        cudaMemcpyAsync(yuyvGPU, data.get_color_frame().get_data(), sizeof(uint8_t) * color_N * 2, cudaMemcpyHostToDevice, mainStream);
+        cudaErrorCheck(mainStream);
 
         // load frames to gpu and preprocess
         realSalient.processFrames(
@@ -155,11 +165,11 @@ try
             10 /* number of iterations in EM estimation algorithm for GMMs*/,
             5 /* number of passes in CRF inference */);
 
-        draw_foreground<<<((color_N - 1) / BLOCK_SIZE + 1), BLOCK_SIZE>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
-        cudaErrorCheck();
+        draw_foreground<<<((color_N - 1) / BLOCK_SIZE + 1), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
+        cudaErrorCheck(mainStream);
 
-        cudaMemcpy(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost);
-        cudaErrorCheck();
+        cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
+        cudaErrorCheck(mainStream);
 
         // Show FPS
         cv::putText(foreground, string_format("FPS: %.1f", fps),
@@ -169,9 +179,9 @@ try
     }
 
     cudaFree(rgbGPU);
-    cudaErrorCheck();
+    cudaErrorCheck(nullptr);
     cudaFree(yuyvGPU);
-    cudaErrorCheck();
+    cudaErrorCheck(nullptr);
 
     return EXIT_SUCCESS;
 }

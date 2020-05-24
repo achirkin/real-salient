@@ -60,6 +60,8 @@ namespace crf
     class PairwisePotential : public IPairwisePotential
     {
     private:
+        const cudaStream_t mainStream;
+
         /** An intermediate buffer to copy the spatial and image features. */
         float *features;
         /**
@@ -79,14 +81,18 @@ namespace crf
         const int h;
 
     public:
-        PairwisePotential(int w, int h, float weight, float div_position, float div_feature = 0.0f)
-            : N(w * h),
+        PairwisePotential(
+            const cudaStream_t mainStream,
+            int w, int h, float weight,
+            float div_position, float div_feature = 0.0f)
+            : mainStream(mainStream),
+              N(w * h),
               weight(weight), w(w), h(h), div_position(div_position), div_feature(div_feature),
               features(nullptr)
         {
-            lattice = new PermutohedralLattice<float, F, M + 1>(N);
+            lattice = new PermutohedralLattice<float, F, M + 1>(mainStream, N);
             cudaMalloc((void **)&features, sizeof(float) * F * N);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         ~PairwisePotential() override
@@ -101,21 +107,18 @@ namespace crf
         {
             dim3 blocks((w - 1) / 16 + 1, (h - 1) / 16 + 1, 1);
             dim3 blockSize(16, 16, 1);
-            assembleImageFeature<F><<<blocks, blockSize>>>(w, h, img_features, div_position, div_feature, features);
-            cudaErrorCheck();
+            assembleImageFeature<F><<<blocks, blockSize, 0, mainStream>>>(w, h, img_features, div_position, div_feature, features);
+            cudaErrorCheck(mainStream);
             lattice->prepare(features); // const float *features,
-            cudaErrorCheck();
         }
 
         void apply(float *out_values, const float *in_values, float *tmp) override
         {
-            cudaErrorCheck();
             lattice->filter(tmp, in_values);
-            cudaErrorCheck();
             dim3 blocks((N - 1) / BLOCK_SIZE + 1, M, 1);
             dim3 blockSize(BLOCK_SIZE, 1, 1);
-            pottsWeight<M><<<blocks, blockSize>>>(out_values, tmp, N, weight);
-            cudaErrorCheck();
+            pottsWeight<M><<<blocks, blockSize, 0, mainStream>>>(out_values, tmp, N, weight);
+            cudaErrorCheck(mainStream);
         }
     };
 
@@ -125,6 +128,8 @@ namespace crf
     {
 
     private:
+        const cudaStream_t mainStream;
+
         // Pre-allocated host/device memory
         float *current, *next, *tmp;
 
@@ -142,24 +147,25 @@ namespace crf
         const int N;
 
         // Create a dense CRF model of size N with M labels
-        explicit DenseCRF(int N, const float *lhood) : N(N), unary(lhood), current(nullptr), next(nullptr), tmp(nullptr)
+        explicit DenseCRF(const cudaStream_t mainStream, int N, const float *lhood)
+            : mainStream(mainStream), N(N), unary(lhood), current(nullptr), next(nullptr), tmp(nullptr)
         {
             cudaMalloc((void **)&current, sizeof(float) * N * M);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaMalloc((void **)&next, sizeof(float) * N * M);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaMalloc((void **)&tmp, sizeof(float) * N * M);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         ~DenseCRF()
         {
             cudaFree(current);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFree(next);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFree(tmp);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             for (auto *pPairwise : pairwise)
             {
                 delete pPairwise;
@@ -244,15 +250,15 @@ namespace crf
     {
         dim3 blocks((N - 1) / BLOCK_SIZE + 1, 1, 1);
         dim3 blockSize(BLOCK_SIZE, 1, 1);
-        expNormKernel<M><<<blocks, blockSize>>>(N, out, in, scale, relax);
-        cudaErrorCheck();
+        expNormKernel<M><<<blocks, blockSize, 0, mainStream>>>(N, out, in, scale, relax);
+        cudaErrorCheck(mainStream);
     }
 
     template <int M>
     void DenseCRF<M>::stepInit()
     {
-        cudaMemcpy(next, unary, sizeof(float) * N * M, cudaMemcpyDeviceToDevice);
-        cudaErrorCheck();
+        cudaMemcpyAsync(next, unary, sizeof(float) * N * M, cudaMemcpyDeviceToDevice, mainStream);
+        cudaErrorCheck(mainStream);
     }
 
 } // namespace crf

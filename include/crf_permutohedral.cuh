@@ -50,6 +50,8 @@ namespace crf
     class HashTableGPU
     {
     private:
+        const cudaStream_t mainStream;
+
         /** A primitive way to keep track of the object copies. */
         std::atomic<int> *refCount;
 
@@ -61,22 +63,22 @@ namespace crf
         /** When doing some filtering, such as blur, this serves as a temporary memory for values. */
         T *valuesCache;
 
-        __host__ HashTableGPU(const int capacity)
-            : capacity(capacity), entries(nullptr), keys(nullptr), values(nullptr), valuesCache(nullptr),
+        __host__ HashTableGPU(const cudaStream_t mainStream, const int capacity)
+            : mainStream(mainStream), capacity(capacity), entries(nullptr), keys(nullptr), values(nullptr), valuesCache(nullptr),
               refCount(new std::atomic<int>(1))
         {
             cudaMalloc((void **)&entries, capacity * 2 * sizeof(int));
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaMalloc((void **)&keys, capacity * pd * sizeof(short));
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaMalloc((void **)&values, capacity * vd * sizeof(T));
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaMalloc((void **)&valuesCache, capacity * vd * sizeof(T));
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         __host__ HashTableGPU(const HashTableGPU &o)
-            : capacity(o.capacity), entries(o.entries), keys(o.keys), values(o.values), valuesCache(o.valuesCache), refCount(o.refCount)
+            : mainStream(o.mainStream), capacity(o.capacity), entries(o.entries), keys(o.keys), values(o.values), valuesCache(o.valuesCache), refCount(o.refCount)
         {
             (*refCount)++;
         }
@@ -86,23 +88,22 @@ namespace crf
             if (refCount->fetch_sub(1) > 1)
                 return;
             delete refCount;
-            cudaErrorCheck();
             cudaFree(keys);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFree(entries);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFree(values);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFree(valuesCache);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         void clear()
         {
-            cudaMemset((void *)entries, -1, capacity * 2 * sizeof(int));
-            cudaErrorCheck();
-            cudaMemset((void *)keys, 0, capacity * pd * sizeof(short));
-            cudaErrorCheck();
+            cudaMemsetAsync((void *)entries, -1, capacity * 2 * sizeof(int), mainStream);
+            cudaErrorCheck(mainStream);
+            cudaMemsetAsync((void *)keys, 0, capacity * pd * sizeof(short), mainStream);
+            cudaErrorCheck(mainStream);
         }
 
         __device__ int modHash(unsigned int n)
@@ -246,8 +247,8 @@ namespace crf
         const int blocks((capacity - 1) / blockSize + 1);
         for (int i = 0; i <= pd; i++)
         {
-            blurKernel<T, pd, vd><<<blocks, blockSize>>>(matrix, i, *this);
-            cudaErrorCheck();
+            blurKernel<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(matrix, i, *this);
+            cudaErrorCheck(mainStream);
             std::swap(values, valuesCache);
         }
     }
@@ -494,6 +495,9 @@ namespace crf
     template <typename T, int pd, int vd>
     class PermutohedralLattice
     {
+    private:
+        const cudaStream_t mainStream;
+
     public:
         int n; //number of pixels/voxels etc..
         T *scaleFactor;
@@ -501,10 +505,12 @@ namespace crf
         HashTableGPU<T, pd, vd> hashTable;
         int filterTimes; // Lazy mark
 
-        PermutohedralLattice(int n_) : n(n_),
-                                       scaleFactor(nullptr),
-                                       matrix(nullptr),
-                                       hashTable(HashTableGPU<T, pd, vd>(n_ * (pd + 1)))
+        PermutohedralLattice(const cudaStream_t mainStream, int n)
+            : mainStream(mainStream),
+              n(n),
+              scaleFactor(nullptr),
+              matrix(nullptr),
+              hashTable(HashTableGPU<T, pd, vd>(mainStream, n * (pd + 1)))
         {
             T hostScaleFactor[pd];
             T invStdDev = (pd + 1) * sqrt(2.0f / 3);
@@ -514,21 +520,21 @@ namespace crf
             }
 
             cudaMalloc((void **)&scaleFactor, sizeof(T) * pd);
-            cudaErrorCheck();
-            cudaMemcpy(scaleFactor, hostScaleFactor, sizeof(T) * pd, cudaMemcpyHostToDevice);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
+            cudaMemcpyAsync(scaleFactor, hostScaleFactor, sizeof(T) * pd, cudaMemcpyHostToDevice, mainStream);
+            cudaErrorCheck(mainStream);
 
             cudaMalloc((void **)&matrix, sizeof(MatrixEntry<T>) * n * (pd + 1));
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         ~PermutohedralLattice()
         {
             // tear aux variables.
             cudaFree(scaleFactor);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
             cudaFree(matrix);
-            cudaErrorCheck();
+            cudaErrorCheck(nullptr);
         }
 
         PermutohedralLattice(const PermutohedralLattice &o) = delete;
@@ -538,41 +544,39 @@ namespace crf
         {
             filterTimes = 0;
             hashTable.clear();
-            cudaErrorCheck();
             dim3 blocks((n - 1) / BLOCK_SIZE + 1, 1, 1);
             dim3 blockSize(BLOCK_SIZE, 1, 1);
             dim3 cleanBlockSize(128, 1, 1);
             dim3 cleanBlocks((n - 1) / cleanBlockSize.x + 1, (2 * pd + 1) / cleanBlockSize.y + 1, 1);
 
-            createLattice<T, pd, vd><<<blocks, blockSize>>>(n, positions, scaleFactor, matrix, hashTable);
-            cudaErrorCheck();
+            createLattice<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(n, positions, scaleFactor, matrix, hashTable);
+            cudaErrorCheck(mainStream);
 
-            cleanHashTable<T, pd, vd><<<cleanBlocks, cleanBlockSize>>>(2 * n * (pd + 1), hashTable);
-            cudaErrorCheck();
+            cleanHashTable<T, pd, vd><<<cleanBlocks, cleanBlockSize, 0, mainStream>>>(2 * n * (pd + 1), hashTable);
+            cudaErrorCheck(mainStream);
         }
 
         // values and position must already be device pointers
         void filter(T *output, const T *inputs)
         {
-            cudaErrorCheck();
             dim3 blocks((n - 1) / BLOCK_SIZE + 1, pd + 1, 1);
             dim3 blockSize(BLOCK_SIZE, 1, 1);
             int cleanBlockSize = 128;
             dim3 cleanBlocks((n - 1) / cleanBlockSize + 1, 2 * (pd + 1), 1);
 
-            cudaMemset((void *)(hashTable.values), 0, hashTable.capacity * vd * sizeof(T));
-            cudaErrorCheck();
-            cudaMemset((void *)(hashTable.valuesCache), 0, hashTable.capacity * vd * sizeof(T));
-            cudaErrorCheck();
+            cudaMemsetAsync((void *)(hashTable.values), 0, hashTable.capacity * vd * sizeof(T), mainStream);
+            cudaErrorCheck(mainStream);
+            cudaMemsetAsync((void *)(hashTable.valuesCache), 0, hashTable.capacity * vd * sizeof(T), mainStream);
+            cudaErrorCheck(mainStream);
 
-            splatCache<T, pd, vd><<<blocks, blockSize>>>(n, inputs, matrix, hashTable, filterTimes == 0);
-            cudaErrorCheck();
+            splatCache<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(n, inputs, matrix, hashTable, filterTimes == 0);
+            cudaErrorCheck(mainStream);
 
             hashTable.blur(matrix);
 
             blockSize.y = 1;
-            slice<T, pd, vd><<<blocks, blockSize>>>(n, output, matrix, hashTable);
-            cudaErrorCheck();
+            slice<T, pd, vd><<<blocks, blockSize, 0, mainStream>>>(n, output, matrix, hashTable);
+            cudaErrorCheck(mainStream);
             ++filterTimes;
         }
     };

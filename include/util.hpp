@@ -14,17 +14,20 @@ std::string string_format(const std::string &format, Args... args)
 }
 
 #ifdef CUDAERRORCHECKS
-#define cudaErrorCheck() __cudaErrorCheck(__func__, __FILE__, __LINE__)
+#define cudaErrorCheck(stream) __cudaErrorCheck(__func__, __FILE__, __LINE__, stream)
 #else
-#define cudaErrorCheck()
+#define cudaErrorCheck(stream)
 #endif
 
-void __cudaErrorCheck(char const *const func, const char *const file, int const line)
+void __cudaErrorCheck(char const *const func, const char *const file, int const line, cudaStream_t stream)
 {
     auto code = cudaGetLastError();
     if (cudaSuccess == code)
     {
-        cudaDeviceSynchronize();
+        if (stream == nullptr)
+            cudaDeviceSynchronize();
+        else
+            cudaStreamSynchronize(stream);
         code = cudaGetLastError();
     }
     if (cudaSuccess != code)
