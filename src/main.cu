@@ -178,6 +178,8 @@ try
         imshow(window_name, foreground);
     }
 
+    cudaStreamDestroy(mainStream);
+    cudaErrorCheck(nullptr);
     cudaFree(rgbGPU);
     cudaErrorCheck(nullptr);
     cudaFree(yuyvGPU);
