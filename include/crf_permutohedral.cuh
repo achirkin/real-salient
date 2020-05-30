@@ -512,6 +512,7 @@ namespace crf
               matrix(nullptr),
               hashTable(HashTableGPU<T, pd, vd>(mainStream, n * (pd + 1)))
         {
+            filterTimes = 0;
             T hostScaleFactor[pd];
             T invStdDev = (pd + 1) * sqrt(2.0f / 3);
             for (int i = 0; i < pd; i++)

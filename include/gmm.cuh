@@ -510,16 +510,13 @@ namespace gmm
         extern __shared__ float sdata[];
 
         const int matricesPerBlock(blockDim.x / C);
-        if (threadIdx.x >= matricesPerBlock * C)
-            return;
 
         // dimension (channel) worked by this thread
         const int c(threadIdx.x % C);
         // matrix index worked by this thread
         const int n(threadIdx.x / C + blockIdx.x * matricesPerBlock);
 
-        if (n >= N)
-            return;
+        const bool outOfBounds = (threadIdx.x >= matricesPerBlock * C) || (n >= N);
 
         float *cov = in_covs + C * C * n;
         float *cov_inv = out_covs_inv + C * C * n;
@@ -529,69 +526,82 @@ namespace gmm
         // (1) calculate the LDL' decomposition.
         float detj = 1;
         float Dj, t;
-        cov_inv[c * C + c] = 1; // by definition of LDL'
+        if (!outOfBounds)
+            cov_inv[c * C + c] = 1; // by definition of LDL'
 #pragma unfold
         for (int j = 0; j < C; j++)
         {
-            // Extra constant here is to dumb-increase covariance diagonal values for better convergence
-            Dj = cov[j * (C + 1)] + 0.001f;
-#pragma unfold
-            for (int k = 0; k < j; k++)
+            if (!outOfBounds)
             {
-                t = cov_inv[j * C + k];
-                Dj -= t * t * matrix_D[k];
-            }
-            Dj = max(EPS, Dj);
-            if (c == 0)
-            {
-                matrix_D[j] = Dj;
-                detj *= Dj;
-            }
-            else if (c > j)
-            {
-                t = cov[c * C + j];
+                // Extra constant here is to dumb-increase covariance diagonal values for better convergence
+                Dj = cov[j * (C + 1)] + 0.001f;
 #pragma unfold
                 for (int k = 0; k < j; k++)
-                    t -= cov_inv[c * C + k] * cov_inv[j * C + k] * matrix_D[k];
-                cov_inv[c * C + j] = t / Dj;
+                {
+                    t = cov_inv[j * C + k];
+                    Dj -= t * t * matrix_D[k];
+                }
+                Dj = max(EPS, Dj);
+                if (c == 0)
+                {
+                    matrix_D[j] = Dj;
+                    detj *= Dj;
+                }
+                else if (c > j)
+                {
+                    t = cov[c * C + j];
+#pragma unfold
+                    for (int k = 0; k < j; k++)
+                        t -= cov_inv[c * C + k] * cov_inv[j * C + k] * matrix_D[k];
+                    cov_inv[c * C + j] = t / Dj;
+                }
             }
             __syncthreads();
         }
 
-        // write matrix determinant
-        if (c == 0)
+        if (!outOfBounds)
         {
-            out_covs_det[n] = detj;
-        }
+            // write matrix determinant
+            if (c == 0)
+            {
+                out_covs_det[n] = detj;
+            }
 
-        // (2) inverse L, simple forward substitution
-        // Diag elements ==1 by definition of LDL
-        // The result is placed into the upper-triangular part of cov_inv.
-#pragma unfold
-        for (int i = c + 1; i < C; i++)
-        {
-            t = 0;
-#pragma unfold
-            for (int j = c; j < i; j++)
-                t -= cov_inv[i * C + j] * cov_inv[c * C + j];
-            cov_inv[c * C + i] = t;
-        }
-        __syncthreads();
-
-        // (3) Compute the precision matrix via inverse L (L^-T D^-1 L^-1)
-#pragma unfold
-        for (int j = 0; j <= c; j++)
-        {
-            t = (c == j ? 1.0f : cov_inv[j * C + c]) / matrix_D[c];
+            // (2) inverse L, simple forward substitution
+            // Diag elements ==1 by definition of LDL
+            // The result is placed into the upper-triangular part of cov_inv.
 #pragma unfold
             for (int i = c + 1; i < C; i++)
-                t += cov_inv[c * C + i] * cov_inv[j * C + i] / matrix_D[i];
-            cov_inv[c * C + j] = t;
+            {
+                t = 0;
+#pragma unfold
+                for (int j = c; j < i; j++)
+                    t -= cov_inv[i * C + j] * cov_inv[c * C + j];
+                cov_inv[c * C + i] = t;
+            }
         }
         __syncthreads();
+
+        if (!outOfBounds)
+        {
+            // (3) Compute the precision matrix via inverse L (L^-T D^-1 L^-1)
 #pragma unfold
-        for (int j = c + 1; j < C; j++)
-            cov_inv[c * C + j] = cov_inv[j * C + c];
+            for (int j = 0; j <= c; j++)
+            {
+                t = (c == j ? 1.0f : cov_inv[j * C + c]) / matrix_D[c];
+#pragma unfold
+                for (int i = c + 1; i < C; i++)
+                    t += cov_inv[c * C + i] * cov_inv[j * C + i] / matrix_D[i];
+                cov_inv[c * C + j] = t;
+            }
+        }
+        __syncthreads();
+        if (!outOfBounds)
+        {
+#pragma unfold
+            for (int j = c + 1; j < C; j++)
+                cov_inv[c * C + j] = cov_inv[j * C + c];
+        }
     }
 
     template <int C, int K, int M>
