@@ -119,8 +119,8 @@ try
     auto getFeature = [yuyvGPU, color_W] __device__(const int i, const int j, float *out_feature) {
         const int base_off = i + j * color_W;
         out_feature[0] = (float)yuyvGPU[base_off * 2];
-        out_feature[1] = 0.5f * (float)yuyvGPU[(base_off - i % 2) * 2 + 1];
-        out_feature[2] = 0.5f * (float)yuyvGPU[(base_off - i % 2) * 2 + 3];
+        out_feature[1] = (float)yuyvGPU[(base_off - i % 2) * 2 + 1];
+        out_feature[2] = (float)yuyvGPU[(base_off - i % 2) * 2 + 3];
     };
     salient::RealSalient<3, 7, decltype(getFeature)> realSalient(
         mainStream, depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
@@ -142,6 +142,16 @@ try
     Mat3b foreground;
     foreground.create(Size(color_W, color_H));
 
+    // initialize the hard bounds where to look for the salient object in the color camera space
+    salient::SceneBounds foregroundBounds = {
+        0 /* int left in pixels */,
+        0 /* int top in pixels */,
+        color_W /* int right in pixels */,
+        color_H /* int bottom in pixels */,
+        0.1f /* float near distance meters */,
+        1.5f /* float far distance meters */
+    };
+
     for (int frame_number = 0; waitKey(1) < 0 && getWindowProperty(window_name, WND_PROP_AUTOSIZE) >= 0; frame_number++)
     {
         frame_stop_time = std::chrono::high_resolution_clock::now();
@@ -160,8 +170,7 @@ try
         // load frames to gpu and preprocess
         realSalient.processFrames(
             (const uint16_t *)data.get_depth_frame().get_data(),
-            0.1f /* cutoff near distance in meters */,
-            1.5f /* cutoff far distance in meters */,
+            foregroundBounds /* bounds for the salient object */,
             10 /* number of iterations in EM estimation algorithm for GMMs*/,
             5 /* number of passes in CRF inference */);
 
@@ -171,11 +180,17 @@ try
         cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
         cudaErrorCheck(mainStream);
 
+        // before using the results coming from GPU, we need to wait the GPU stream to finish.
+        cudaStreamSynchronize(mainStream);
         // Show FPS
         cv::putText(foreground, string_format("FPS: %.1f", fps),
                     cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
         imshow(window_name, foreground);
+
+        // update bounds given our refined labeling, assuming they don't change too much.
+        // NB: in reality, it's much better to infer these bounds from the VR tracker positions.
+        foregroundBounds = realSalient.postprocessInferBounds();
     }
 
     cudaStreamDestroy(mainStream);

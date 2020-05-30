@@ -33,6 +33,17 @@ namespace salient
         float translation[3];
     };
 
+    /** A volume in the image+depth space. */
+    struct SceneBounds
+    {
+        int left;
+        int top;
+        int right;
+        int bottom;
+        float near;
+        float far;
+    };
+
     class FrameTransform
     {
     private:
@@ -105,6 +116,10 @@ namespace salient
         cudaArray *depthArray, *depthInterpArray, *lhoodArray;
         cudaTextureObject_t depthTex, depthInterpTex, lhoodTex;
         cudaSurfaceObject_t depthInterpSurf;
+        /** A buffer to render a temporary histogram and output SceneBounds in the optional post-processing step. */
+        uint32_t *postProcess_temp;
+        uint32_t *postProcess_temp_cpu;
+        static const int depthHistSize = 256;
 
         static void initUint16Frame(const int w, const int h, cudaArray *&array, cudaTextureObject_t *texture);
         template <int TexChannels>
@@ -119,12 +134,8 @@ namespace salient
         /** Copy the color buffer into the GPU and populate the feature buffer with the provided GetFeature function. */
         void loadColorFrame();
 
-        /** Use the earlier initialized depth data to initialize labels.
-         * 
-         *  @param depth_low cutoff near distance in meters.
-         *  @param depth_high cutoff far distance in meters. 
-         */
-        void buildLabels(const float depth_low, const float depth_high);
+        /** Use the earlier initialized depth data to initialize labels. */
+        void buildLabels(const SceneBounds foreground_bounds);
 
         /** Run all models on the current frame. */
         void runModels(const int gmmIterations = 10, const int crfIterations = 5);
@@ -169,6 +180,16 @@ namespace salient
          */
         float *probabilities;
 
+        /**
+         * Aligned and imputed values of depth in the processing image space (downscaled color).
+         * 
+         * Imputed values are saved with negative sign.
+         */
+        float *aligned_depth;
+
+        /** Focal length of the color image plane, as a multiple of pixel size */
+        const float colorFx, colorFy;
+
         RealSalient(
             const cudaStream_t mainStream,
             const CameraIntrinsics depthIntrinsics,
@@ -192,10 +213,18 @@ namespace salient
               depthArray(nullptr), depthInterpArray(nullptr), lhoodArray(nullptr),
               gmmModel(mainStream, W * H),
               crfModel(mainStream, W * H, gmmModel.logLikelihoodPtr()),
-              probabilities(nullptr)
+              probabilities(nullptr), aligned_depth(nullptr),
+              postProcess_temp(nullptr), postProcess_temp_cpu(nullptr),
+              colorFx(colorIntrinsics.fx), colorFy(colorIntrinsics.fy)
         {
             cudaMalloc((void **)&probabilities, sizeof(float) * color_W * color_H);
             cudaErrorCheck(nullptr);
+            cudaMalloc((void **)&postProcess_temp, sizeof(uint32_t) * (W + H + depthHistSize));
+            cudaErrorCheck(nullptr);
+            cudaMalloc((void **)&aligned_depth, sizeof(float) * W * H);
+            cudaErrorCheck(nullptr);
+            postProcess_temp_cpu = new uint32_t[W + H + depthHistSize];
+
             initUint16Frame(depth_W, depth_H, depthArray, &depthTex);
             initInterpolatedFrame<1>(depth_W, depth_H, depthInterpArray, &depthInterpTex, &depthInterpSurf);
             initInterpolatedFrame<2>(W, H, lhoodArray, &lhoodTex, nullptr);
@@ -205,6 +234,11 @@ namespace salient
 
         ~RealSalient()
         {
+            delete[] postProcess_temp_cpu;
+            cudaFree(aligned_depth);
+            cudaErrorCheck(nullptr);
+            cudaFree(postProcess_temp);
+            cudaErrorCheck(nullptr);
             cudaFree(probabilities);
             cudaErrorCheck(nullptr);
             cudaDestroyTextureObject(depthInterpTex);
@@ -229,17 +263,28 @@ namespace salient
          * Process a pair of frames (depth and color) and store the probabilities (of being foreground, per-pixel).
          * 
          * @param host_depth_buffer an image from the depth camera.
-         * @param depth_low cutoff near distance in meters.
-         * @param depth_high cutoff far distance in meters.
+         * @param foreground_bounds cutoff near and far distance in meters and min/max x/y pixel positions in the space of the color camera.
          * @param gmmIterations number of iterations in EM estimation algorithm for GMMs.
          * @param crfIterations number of passes in CRF inference.
          */
         void processFrames(
             const uint16_t *host_depth_buffer,
-            const float depth_low,
-            const float depth_high,
+            const SceneBounds foreground_bounds,
             const int gmmIterations = 10,
             const int crfIterations = 5);
+
+        /**
+         * Try to infer bounds on the salient object (foreground).
+         * It gets the final labeling for the current frame and aggregates minimum/maximum positions and depths of the foreground pixels.
+         * The bounds are in the space of the color camera.
+         * 
+         * @param percentile is used to ignore a small fraction of outlier foreground pixels.
+         * @param maxDepth maximum value of depth to keep in the histogram (in meters).
+         * @param margin add this number to the bounds size (in meters).
+         * @param minSize minimum size of the bounds (in meters).
+         * @param maxSize maximum size of the bounds (in meters).
+         */
+        SceneBounds postprocessInferBounds(const float percentile = 0.95f, const float maxDepth = 6.0f, const float margin = 0.3f, const float minSize = 0.5f, const float maxSize = 2.5f);
     };
 
     dim3 enlargeSquare(const dim3 square, const int pow2)
@@ -431,12 +476,13 @@ namespace salient
     // 1 - background
     __global__ void depth_to_labels(
         const int W, const int H,
+        const int downsampleRatio,
         cudaTextureObject_t depthTex,
         cudaTextureObject_t depthInterpTex,
         int8_t *out_labels,
+        float *out_depth,
         const float depthScale,
-        const float depth_low,
-        const float depth_high,
+        const SceneBounds foreground_bounds,
         const salient::FrameTransform color2depth)
     {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -444,10 +490,15 @@ namespace salient
         if (i >= W || j >= H)
             return;
 
+        const bool inBounds =
+            downsampleRatio * i >= foreground_bounds.left &&
+            downsampleRatio * i < foreground_bounds.right &&
+            downsampleRatio * j >= foreground_bounds.top &&
+            downsampleRatio * j < foreground_bounds.bottom;
         float di = (float)i;
         float dj = (float)j;
         float dx, dy;
-        float depth = max(0.3f, 0.5f * (depth_high + depth_low));
+        float depth = max(0.3f, 0.5f * (foreground_bounds.far + foreground_bounds.near));
         // get approximate depth first
         color2depth.transform(di, dj, depth, dx, dy);
         depth = tex2D<float>(depthInterpTex, dx, dy);
@@ -457,11 +508,13 @@ namespace salient
         depth = tex2D<uint16_t>(depthTex, dx, dy) * depthScale;
         if (depth > 0)
         {
-            out_labels[i + j * W] = (depth > depth_high || depth < depth_low) ? 1 : 0;
+            out_depth[i + j * W] = depth;
+            out_labels[i + j * W] = (!inBounds || depth > foreground_bounds.far || depth < foreground_bounds.near) ? 1 : 0;
         }
         else
         {
-            out_labels[i + j * W] = -1;
+            out_depth[i + j * W] = -tex2D<float>(depthInterpTex, dx, dy);
+            out_labels[i + j * W] = inBounds ? -1 : 1;
         }
     }
 
@@ -530,26 +583,28 @@ namespace salient
     }
 
     template <int C, int GaussianK, class GetFeature>
-    void RealSalient<C, GaussianK, GetFeature>::buildLabels(const float depth_low, const float depth_high)
+    void RealSalient<C, GaussianK, GetFeature>::buildLabels(const SceneBounds foreground_bounds)
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
-        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, depthTex, depthInterpTex, gmmModel.labelsPtr(), depthScale, depth_low, depth_high, color2depth);
+        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(), aligned_depth, depthScale, foreground_bounds, color2depth);
+        cudaErrorCheck(mainStream);
         labels_impute<X><<<distribute(dimWork, enlargeSquare(squareBlockSize, X)), squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
+        cudaErrorCheck(mainStream);
     }
 
     template <int C, int GaussianK, class GetFeature>
     void RealSalient<C, GaussianK, GetFeature>::initModels()
     {
         // add a color independent term (feature = pixel location 0..W-1, 0..H-1)
-        smoothnessPairwise = new crf::PairwisePotential<2, 2>(mainStream, W, H, 3.0f, 3.0f);
+        smoothnessPairwise = new crf::PairwisePotential<2, 2>(mainStream, W, H, 3.0f, 4.0f);
         crfModel.addPairwiseEnergy(smoothnessPairwise);
-        smoothnessPairwise->loadImage(); // this one does not require an image, so is initialized only once.
 
         // add a color dependent term (feature = xyrgb)
-        appearancePairwise = new crf::PairwisePotential<2, 2 + C>(mainStream, W, H, 10.0f, 40.0f, 20.0f);
+        appearancePairwise = new crf::PairwisePotential<2, 2 + C>(mainStream, W, H, 10.0f, 60.0f, 25.0f);
         crfModel.addPairwiseEnergy(appearancePairwise);
 
-        similarityPairwise = new crf::PairwisePotential<2, C>(mainStream, W, H, 2.0f, 0, 100.0f);
+        // add a position independent term (feature = rgb)
+        similarityPairwise = new crf::PairwisePotential<2, C>(mainStream, W, H, 0.5f, 0, 100.0f);
         crfModel.addPairwiseEnergy(similarityPairwise);
     }
 
@@ -565,6 +620,7 @@ namespace salient
 
         if (crfIterations > 0)
         {
+            smoothnessPairwise->loadImage();
             appearancePairwise->loadImage(gmmModel.featuresPtr());
             similarityPairwise->loadImage(gmmModel.featuresPtr());
             crfModel.inference(crfIterations);
@@ -596,14 +652,13 @@ namespace salient
     template <int C, int GaussianK, class GetFeature>
     void RealSalient<C, GaussianK, GetFeature>::processFrames(
         const uint16_t *host_depth_buffer,
-        const float depth_low,
-        const float depth_high,
+        const SceneBounds foreground_bounds,
         const int gmmIterations,
         const int crfIterations)
     {
         loadDepthFrame(host_depth_buffer);
         loadColorFrame();
-        buildLabels(depth_low, depth_high);
+        buildLabels(foreground_bounds);
         runModels(gmmIterations, crfIterations);
 
         auto lhoodPtr = crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
@@ -611,5 +666,133 @@ namespace salient
         cudaErrorCheck(mainStream);
         compute_probabilities<<<distribute(dimColor, squareBlockSize), squareBlockSize, 0, mainStream>>>(color_W, color_H, W, H, probabilities, lhoodTex);
         cudaErrorCheck(mainStream);
+    }
+
+    __global__ void postprocess_histograms(
+        const int W, const int H, const int D,
+        const float max_depth,
+        uint32_t *out_hists,
+        cudaTextureObject_t lhoodTex /** likelihoods of being in a class. */,
+        const float *in_depth /** aligned, float-valued depth in meters. Negative values mean imputed. */)
+    {
+        extern __shared__ uint32_t shists[];
+        const int bd = blockDim.x; // == blockDim.y;
+        uint32_t *hist_sx = shists;
+        uint32_t *hist_sy = hist_sx + bd * bd;
+        uint32_t *hist_x = out_hists;
+        uint32_t *hist_y = hist_x + W;
+        uint32_t *hist_d = hist_y + H;
+        const int si = threadIdx.x;
+        const int sj = threadIdx.y;
+        const int i = blockIdx.x * bd + si;
+        const int j = blockIdx.y * bd + sj;
+        const bool outOfBounds = i >= W || j >= H;
+        const float2 lhoods = tex2D<float2>(lhoodTex, i, j);
+        const bool foreground = !outOfBounds && lhoods.x > lhoods.y;
+        const float depth = foreground ? in_depth[i + j * W] : 0;
+
+        if (depth > 0 && depth < max_depth)
+            atomicAdd(hist_d + lrintf((D - 1) * depth / max_depth), 1);
+
+        hist_sx[si + sj * bd] = foreground ? 1 : 0;
+        hist_sy[si + sj * bd] = foreground ? 1 : 0;
+
+        __syncthreads();
+
+        for (unsigned int t = bd >> 1; t > 0; t >>= 1)
+        {
+            if (sj < t)
+                hist_sx[si + sj * bd] += hist_sx[si + (sj + t) * bd];
+
+            if (si < t)
+                hist_sy[si + sj * bd] += hist_sy[si + t + sj * bd];
+
+            __syncthreads();
+        }
+
+        if (si == 0 && !outOfBounds)
+            atomicAdd(hist_y + j, hist_sy[sj * bd]);
+
+        if (sj == 0 && !outOfBounds)
+            atomicAdd(hist_x + i, hist_sx[si]);
+    }
+
+    void getArrayPercentile(int N, const uint32_t *array, const float percentile, int &out_min, int &out_max)
+    {
+        uint32_t sum = 0;
+        for (int i = 0; i < N; i++)
+            sum += array[i];
+        uint32_t thresh = (uint32_t)roundf((1.0f - percentile) * 0.5f * sum);
+        out_min = 0;
+        out_max = N;
+        uint32_t s = 0;
+        while (s < thresh)
+        {
+            s += array[out_min];
+            out_min++;
+        }
+        s = 0;
+        while (s < thresh)
+        {
+            out_max--;
+            s += array[out_max];
+        }
+    }
+
+    void applyLimits(const float minValue, const float maxValue, const float margin, const float minSize, const float maxSize, float &x, float &y)
+    {
+        x = max(minValue, x - margin);
+        y = min(maxValue, y + margin);
+        float diff = min(maxSize, max(minSize, y - x)) * 0.5f;
+        float avg = max(minValue + diff, min(maxValue - diff, (x + y) * 0.5f));
+        x = avg - diff;
+        y = avg + diff;
+    }
+
+    template <int C, int GaussianK, class GetFeature>
+    SceneBounds RealSalient<C, GaussianK, GetFeature>::postprocessInferBounds(const float percentile, const float maxDepth, const float margin, const float minSize, const float maxSize)
+    {
+        dim3 blocks = distribute(dim3(W, H, 1), squareBlockSize);
+        cudaMemsetAsync((void *)postProcess_temp, 0, sizeof(uint32_t) * (W + H + depthHistSize), mainStream);
+        cudaErrorCheck(mainStream);
+        postprocess_histograms<<<blocks, squareBlockSize, sizeof(uint32_t) * squareBlockSize.x * squareBlockSize.y * 2, mainStream>>>(W, H, depthHistSize, maxDepth, postProcess_temp, lhoodTex, aligned_depth);
+        cudaErrorCheck(mainStream);
+        cudaMemcpyAsync(postProcess_temp_cpu, postProcess_temp, sizeof(uint32_t) * (W + H + depthHistSize), cudaMemcpyDeviceToHost, mainStream);
+        cudaErrorCheck(mainStream);
+        cudaStreamSynchronize(mainStream);
+
+        int xmin, xmax, ymin, ymax, zmin, zmax;
+        getArrayPercentile(W, postProcess_temp_cpu, percentile, xmin, xmax);
+        getArrayPercentile(H, postProcess_temp_cpu + W, percentile, ymin, ymax);
+        getArrayPercentile(depthHistSize, postProcess_temp_cpu + W + H, percentile, zmin, zmax);
+
+        const float dz = maxDepth / depthHistSize;
+        float dmin = dz * zmin;
+        float dmax = dz * zmax;
+        applyLimits(0.1f, maxDepth, margin, minSize, maxSize, dmin, dmax);
+        float davg = 0.5f * (dmin + dmax);
+
+        float a = downsampleRatio * xmin;
+        float b = downsampleRatio * xmax;
+        float r = colorFx / davg;
+        applyLimits(0, color_W, margin * r, minSize * r, maxSize * r, a, b);
+        xmin = (int)round(a);
+        xmax = (int)round(b);
+
+        a = downsampleRatio * ymin;
+        b = downsampleRatio * ymax;
+        r = colorFy / davg;
+        applyLimits(0, color_H, margin * r, minSize * r, maxSize * r, a, b);
+        ymin = (int)round(a);
+        ymax = (int)round(b);
+
+        return SceneBounds{
+            xmin /* int left in pixels */,
+            ymin /* int top in pixels */,
+            xmax /* int right in pixels */,
+            ymax /* int bottom in pixels */,
+            dmin /* float near distance meters */,
+            dmax /* float far distance meters */
+        };
     }
 } // namespace salient
