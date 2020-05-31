@@ -52,7 +52,7 @@ namespace crf
     {
     public:
         virtual ~IPairwisePotential() {}
-        virtual void loadImage(const float *img_features = nullptr) = 0;
+        virtual void loadImage(const float weight, const float div_position, const float div_feature = 0.0f, const float *img_features = nullptr) = 0;
         virtual void apply(float *out_values, const float *in_values, float *tmp) = 0;
     };
 
@@ -74,20 +74,14 @@ namespace crf
 
     protected:
         const int N;
-        const float weight;
-        const float div_position;
-        const float div_feature;
+        float weight;
         const int w;
         const int h;
 
     public:
-        PairwisePotential(
-            const cudaStream_t mainStream,
-            int w, int h, float weight,
-            float div_position, float div_feature = 0.0f)
+        PairwisePotential(const cudaStream_t mainStream, int w, int h)
             : mainStream(mainStream),
-              N(w * h),
-              weight(weight), w(w), h(h), div_position(div_position), div_feature(div_feature),
+              N(w * h), w(w), h(h),
               features(nullptr)
         {
             lattice = new PermutohedralLattice<float, F, M + 1>(mainStream, N);
@@ -103,11 +97,12 @@ namespace crf
 
         PairwisePotential(const PairwisePotential &o) = delete;
 
-        void loadImage(const float *img_features = nullptr) override
+        void loadImage(const float weight, const float div_position, const float div_feature = 0.0f, const float *img_features = nullptr) override
         {
             dim3 blockSize(32, 32, 1);
             dim3 workSize(w, h, 1);
             dim3 blocks = distribute(workSize, blockSize);
+            this->weight = weight;
             assembleImageFeature<F><<<blocks, blockSize, 0, mainStream>>>(w, h, img_features, div_position, div_feature, features);
             cudaErrorCheck(mainStream);
             lattice->prepare(features); // const float *features,

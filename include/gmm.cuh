@@ -82,10 +82,10 @@ namespace gmm
         const int N;
 
         /** Exponential moving average constant.  */
-        const float alpha;
+        float alpha;
 
         /** A multiplier for imputed labels (label for class 'm' imputed is 'm - 128'). */
-        const float imputed_weight;
+        float imputed_weight;
 
         /**
          * Initialize the instance and allocate GPU arrays.

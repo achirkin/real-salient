@@ -44,6 +44,25 @@ namespace salient
         float far;
     };
 
+    /** Settings for the components of RealSalient. Can be changed every frame. */
+    struct AnalysisSettings
+    {
+        // GMM settings
+        int gmmIterations = 10;
+        float timeAlpha = 0.1f;
+        float imputedLabelWeight = 0.3f;
+
+        // CRF settings
+        int crfIterations = 5;
+        float smoothnessWeight = 3.0f;
+        float smoothnessVarPos = 4.0f;
+        float appearanceWeight = 10.0f;
+        float appearanceVarPos = 60.0f;
+        float appearanceVarCol = 25.0f;
+        float similarityWeight = 0.5f;
+        float similarityVarCol = 100.0f;
+    };
+
     class FrameTransform
     {
     private:
@@ -138,7 +157,7 @@ namespace salient
         void buildLabels(const SceneBounds foreground_bounds);
 
         /** Run all models on the current frame. */
-        void runModels(const int gmmIterations = 10, const int crfIterations = 5);
+        void runModels();
 
     public:
         /** Divide width and height of the original color image by this value to reduce the computational burden. */
@@ -189,6 +208,8 @@ namespace salient
 
         /** Focal length of the color image plane, as a multiple of pixel size */
         const float colorFx, colorFy;
+
+        AnalysisSettings analysisSettings{};
 
         RealSalient(
             const cudaStream_t mainStream,
@@ -269,9 +290,7 @@ namespace salient
          */
         void processFrames(
             const uint16_t *host_depth_buffer,
-            const SceneBounds foreground_bounds,
-            const int gmmIterations = 10,
-            const int crfIterations = 5);
+            const SceneBounds foreground_bounds);
 
         /**
          * Try to infer bounds on the salient object (foreground).
@@ -596,34 +615,46 @@ namespace salient
     void RealSalient<C, GaussianK, GetFeature>::initModels()
     {
         // add a color independent term (feature = pixel location 0..W-1, 0..H-1)
-        smoothnessPairwise = new crf::PairwisePotential<2, 2>(mainStream, W, H, 3.0f, 4.0f);
+        smoothnessPairwise = new crf::PairwisePotential<2, 2>(mainStream, W, H);
         crfModel.addPairwiseEnergy(smoothnessPairwise);
 
         // add a color dependent term (feature = xyrgb)
-        appearancePairwise = new crf::PairwisePotential<2, 2 + C>(mainStream, W, H, 10.0f, 60.0f, 25.0f);
+        appearancePairwise = new crf::PairwisePotential<2, 2 + C>(mainStream, W, H);
         crfModel.addPairwiseEnergy(appearancePairwise);
 
         // add a position independent term (feature = rgb)
-        similarityPairwise = new crf::PairwisePotential<2, C>(mainStream, W, H, 0.5f, 0, 100.0f);
+        similarityPairwise = new crf::PairwisePotential<2, C>(mainStream, W, H);
         crfModel.addPairwiseEnergy(similarityPairwise);
     }
 
     template <int C, int GaussianK, class GetFeature>
-    void RealSalient<C, GaussianK, GetFeature>::runModels(const int gmmIterations, const int crfIterations)
+    void RealSalient<C, GaussianK, GetFeature>::runModels()
     {
-        if (gmmIterations > 0)
+        if (analysisSettings.gmmIterations > 0)
         {
-            gmmModel.iterate(gmmIterations);
+            gmmModel.alpha = analysisSettings.timeAlpha;
+            gmmModel.imputed_weight = analysisSettings.imputedLabelWeight;
+            gmmModel.iterate(analysisSettings.gmmIterations);
         }
 
         gmmModel.infer();
 
-        if (crfIterations > 0)
+        if (analysisSettings.crfIterations > 0)
         {
-            smoothnessPairwise->loadImage();
-            appearancePairwise->loadImage(gmmModel.featuresPtr());
-            similarityPairwise->loadImage(gmmModel.featuresPtr());
-            crfModel.inference(crfIterations);
+            smoothnessPairwise->loadImage(
+                analysisSettings.smoothnessWeight,
+                analysisSettings.smoothnessVarPos);
+            appearancePairwise->loadImage(
+                analysisSettings.appearanceWeight,
+                analysisSettings.appearanceVarPos,
+                analysisSettings.appearanceVarCol,
+                gmmModel.featuresPtr());
+            similarityPairwise->loadImage(
+                analysisSettings.similarityWeight,
+                0,
+                analysisSettings.similarityVarCol,
+                gmmModel.featuresPtr());
+            crfModel.inference(analysisSettings.crfIterations);
         }
     }
 
@@ -650,18 +681,14 @@ namespace salient
     }
 
     template <int C, int GaussianK, class GetFeature>
-    void RealSalient<C, GaussianK, GetFeature>::processFrames(
-        const uint16_t *host_depth_buffer,
-        const SceneBounds foreground_bounds,
-        const int gmmIterations,
-        const int crfIterations)
+    void RealSalient<C, GaussianK, GetFeature>::processFrames(const uint16_t *host_depth_buffer, const SceneBounds foreground_bounds)
     {
         loadDepthFrame(host_depth_buffer);
         loadColorFrame();
         buildLabels(foreground_bounds);
-        runModels(gmmIterations, crfIterations);
+        runModels();
 
-        auto lhoodPtr = crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
+        auto lhoodPtr = analysisSettings.crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
         cudaMemcpyToArrayAsync(lhoodArray, 0, 0, lhoodPtr, sizeof(float) * 2 * W * H, cudaMemcpyDeviceToDevice, mainStream);
         cudaErrorCheck(mainStream);
         compute_probabilities<<<distribute(dimColor, squareBlockSize), squareBlockSize, 0, mainStream>>>(color_W, color_H, W, H, probabilities, lhoodTex);

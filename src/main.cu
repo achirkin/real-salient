@@ -134,6 +134,7 @@ try
     auto frame_stop_time = frame_start_time;
     // auto frame_cap_ms = 1000 / frame_cap;
     auto ema_alpha = 0.1;
+    char fpsText[20];
 
     // Skips some frames to allow for auto-exposure stabilization
     for (int i = 0; i < 10; i++)
@@ -152,8 +153,45 @@ try
         1.5f /* float far distance meters */
     };
 
+    // Control all analysis parameters via trackbars
+    int gmmIterations = realSalient.analysisSettings.gmmIterations;
+    createTrackbar("GMM iterations", window_name, &gmmIterations, 100);
+    int timeAlpha = (int)round(realSalient.analysisSettings.timeAlpha * 100);
+    createTrackbar("GMM EMA α (x100)", window_name, &timeAlpha, 100);
+    int imputedLabelWeight = (int)round(realSalient.analysisSettings.imputedLabelWeight * 100);
+    createTrackbar("Imputed label weight (x100)", window_name, &imputedLabelWeight, 100);
+    int crfIterations = realSalient.analysisSettings.crfIterations;
+    createTrackbar("CRF iterations", window_name, &crfIterations, 20);
+    int smoothnessWeight = (int)round(realSalient.analysisSettings.smoothnessWeight * 10);
+    createTrackbar("CRF smoothness weight (x10)", window_name, &smoothnessWeight, 200);
+    int smoothnessVarPos = (int)round(sqrt(realSalient.analysisSettings.smoothnessVarPos) * 10);
+    createTrackbar("CRF smoothness σ (x10)", window_name, &smoothnessVarPos, 1000);
+    int appearanceWeight = (int)round(realSalient.analysisSettings.appearanceWeight * 10);
+    createTrackbar("CRF appearance weight (x10)", window_name, &appearanceWeight, 200);
+    int appearanceVarPos = (int)round(sqrt(realSalient.analysisSettings.appearanceVarPos) * 10);
+    createTrackbar("CRF appearance σ-pos (x10)", window_name, &appearanceVarPos, 1000);
+    int appearanceVarCol = (int)round(sqrt(realSalient.analysisSettings.appearanceVarCol) * 10);
+    createTrackbar("CRF appearance σ-col (x10)", window_name, &appearanceVarCol, 1000);
+    int similarityWeight = (int)round(realSalient.analysisSettings.similarityWeight * 10);
+    createTrackbar("CRF similarity weight (x10)", window_name, &similarityWeight, 200);
+    int similarityVarCol = (int)round(sqrt(realSalient.analysisSettings.similarityVarCol) * 10);
+    createTrackbar("CRF similarity σ (x10)", window_name, &similarityVarCol, 1000);
+
     for (int frame_number = 0; waitKey(1) < 0 && getWindowProperty(window_name, WND_PROP_AUTOSIZE) >= 0; frame_number++)
     {
+        // update analysis parameters from the trackbar every frame (avoiding 100500 callbacks to createTrackbar fun)
+        realSalient.analysisSettings.gmmIterations = gmmIterations;
+        realSalient.analysisSettings.timeAlpha = (float)timeAlpha * 0.01f;
+        realSalient.analysisSettings.imputedLabelWeight = (float)imputedLabelWeight * 0.01f;
+        realSalient.analysisSettings.crfIterations = crfIterations;
+        realSalient.analysisSettings.smoothnessWeight = (float)smoothnessWeight * 0.1f;
+        realSalient.analysisSettings.smoothnessVarPos = max(0.01f, (float)(smoothnessVarPos * smoothnessVarPos) * 0.01f);
+        realSalient.analysisSettings.appearanceWeight = (float)appearanceWeight * 0.1f;
+        realSalient.analysisSettings.appearanceVarPos = max(0.01f, (float)(appearanceVarPos * appearanceVarPos) * 0.01f);
+        realSalient.analysisSettings.appearanceVarCol = max(0.01f, (float)(appearanceVarCol * appearanceVarCol) * 0.01f);
+        realSalient.analysisSettings.similarityWeight = (float)similarityWeight * 0.1f;
+        realSalient.analysisSettings.similarityVarCol = max(0.01f, (float)(similarityVarCol * similarityVarCol) * 0.01f);
+
         frame_stop_time = std::chrono::high_resolution_clock::now();
         auto frame_time = std::chrono::duration_cast<std::chrono::microseconds>(frame_stop_time - frame_start_time);
         frame_avg_time = frame_avg_time * (1 - ema_alpha) + frame_time.count() * ema_alpha / 1000000;
@@ -170,9 +208,7 @@ try
         // load frames to gpu and preprocess
         realSalient.processFrames(
             (const uint16_t *)data.get_depth_frame().get_data(),
-            foregroundBounds /* bounds for the salient object */,
-            10 /* number of iterations in EM estimation algorithm for GMMs*/,
-            5 /* number of passes in CRF inference */);
+            foregroundBounds);
 
         draw_foreground<<<distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
         cudaErrorCheck(mainStream);
@@ -183,8 +219,8 @@ try
         // before using the results coming from GPU, we need to wait the GPU stream to finish.
         cudaStreamSynchronize(mainStream);
         // Show FPS
-        cv::putText(foreground, string_format("FPS: %.1f", fps),
-                    cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+        sprintf(fpsText, "FPS: %.1f", fps);
+        cv::putText(foreground, fpsText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
         imshow(window_name, foreground);
 
