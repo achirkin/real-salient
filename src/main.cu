@@ -2,11 +2,12 @@
 #define DOWNSCALE_MAX_FRAME_HIGHT 400
 
 #include <fstream>
+#include <chrono>
+#include <thread>
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <librealsense2/rs_advanced_mode.hpp>
 #include <librealsense2/rsutil.h>
 #include <opencv2/opencv.hpp> // Include OpenCV API
-#include <chrono>
 #include "util.hpp"
 #include "salient.cuh"
 
@@ -49,7 +50,7 @@ rs2::device get_rs_device()
             std::cout << "Loaded a device on attempt " << (i + 1) << "." << std::endl;
             break;
         }
-        catch (const std::exception& e)
+        catch (const std::exception &e)
         {
             if (i == total_attempts - 1)
             {
