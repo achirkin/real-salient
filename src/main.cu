@@ -1,6 +1,7 @@
 #define BLOCK_SIZE 256
 #define DOWNSCALE_MAX_FRAME_HIGHT 400
 
+#include <fstream>
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <librealsense2/rs_advanced_mode.hpp>
 #include <librealsense2/rsutil.h>
@@ -33,15 +34,68 @@ __global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilit
     }
 }
 
+rs2::device get_rs_device()
+{
+    rs2::context ctx;
+    rs2::device dev;
+    auto devices_list = ctx.query_devices();
+    size_t device_count = devices_list.size();
+    const int total_attempts = 1000;
+    for (int i = 0; i < total_attempts; i++)
+    {
+        try
+        {
+            dev = devices_list[i % device_count];
+            std::cout << "Loaded a device on attempt " << (i + 1) << "." << std::endl;
+            break;
+        }
+        catch (const std::exception& e)
+        {
+            if (i == total_attempts - 1)
+            {
+                std::cout << "Could not create device - " << e.what() << "." << std::endl;
+                exit(EXIT_FAILURE);
+            }
+        }
+        catch (...)
+        {
+            if (i == total_attempts - 1)
+            {
+                std::cout << "Failed to created device." << std::endl;
+                exit(EXIT_FAILURE);
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // load json preset for high accuracy mode
+    try
+    {
+        auto dev_adv = rs400::advanced_mode::advanced_mode(dev);
+        std::ifstream settingsJSONFile("preset.json");
+        std::string settingsJSON((std::istreambuf_iterator<char>(settingsJSONFile)), std::istreambuf_iterator<char>());
+        dev_adv.load_json(settingsJSON);
+    }
+    catch (...)
+    {
+        std::cout << "Skipped setting the camera configuration from 'preset.json'." << std::endl;
+    }
+    return dev;
+}
+
 int main(int argc, char *argv[])
 try
 {
     using namespace cv;
     using namespace rs2;
 
-    // Start the camera
+    // find the camera
     pipeline pipe;
     rs2::config config;
+    auto dev = get_rs_device();
+
+    // Start the camera
+    config.enable_device(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
     config.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, 30);
     // config.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_YUYV, 30);
     config.enable_stream(RS2_STREAM_COLOR, 1920, 1080, RS2_FORMAT_YUYV, 30);
@@ -49,14 +103,7 @@ try
     // config.enable_stream(RS2_STREAM_COLOR, 848, 480, RS2_FORMAT_YUYV, 60)
 
     auto selection = pipe.start(config);
-    auto dev = selection.get_device();
     auto sensor = dev.first<rs2::depth_sensor>();
-
-    // load json preset for high accuracy mode
-    auto dev_adv = rs400::advanced_mode::advanced_mode(dev);
-    std::ifstream settingsJSONFile("preset.json");
-    std::string settingsJSON((std::istreambuf_iterator<char>(settingsJSONFile)), std::istreambuf_iterator<char>());
-    dev_adv.load_json(settingsJSON);
 
     // get dimension (to be sure)
     auto depth_stream = selection.get_stream(RS2_STREAM_DEPTH).as<rs2::video_stream_profile>();
