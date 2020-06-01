@@ -20,7 +20,7 @@ target_compile_options(real-salient PRIVATE
 set (CMAKE_CXX_STANDARD 14)
 #target_compile_features(real-salient PUBLIC cxx_std_14)
 set_target_properties(real-salient PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_link_libraries(real-salient realsense2 ${OpenCV_LIBS})
+target_link_libraries(real-salient realsense2 openvr_api ${OpenCV_LIBS})
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})

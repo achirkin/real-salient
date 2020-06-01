@@ -4,6 +4,7 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <openvr.h>
 #include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include <librealsense2/rs_advanced_mode.hpp>
 #include <librealsense2/rsutil.h>
@@ -84,11 +85,116 @@ rs2::device get_rs_device()
     return dev;
 }
 
+salient::SceneBounds boundPoints(const int w, const int h, const float d, const int n, const float* depths, const int* xys, const salient::CameraIntrinsics camIntr)
+{
+    float marginTop = 0.2f;
+    float marginSide = 0.5f;
+    float marginBottom = 2.0f; // don't remove legs!
+    float cur_depth;
+    salient::SceneBounds result;
+    result.left = w;
+    result.top = h;
+    result.right = 0;
+    result.bottom = 0;
+    result.near = d;
+    result.far = 0.01f;
+    for (int i = 0; i < n; i++)
+    {
+        cur_depth = depths[i];
+        if (cur_depth > 0.01f && cur_depth < d)
+        {
+            result.near = min(result.near, max(0.01f, cur_depth - marginSide));
+            result.far = max(result.far, min(d, cur_depth + marginSide));
+            result.left = min(result.left, max(0, (int)round(xys[2 * i] - marginSide * camIntr.fx / cur_depth)));
+            result.top = min(result.top, max(0, (int)round(xys[2 * i + 1] - marginTop * camIntr.fy / cur_depth)));
+            result.right = max(result.right, min(w, (int)round(xys[2 * i] + marginSide * camIntr.fx / cur_depth)));
+            result.bottom = max(result.bottom, min(h, (int)round(xys[2 * i + 1] + marginBottom * camIntr.fy / cur_depth)));
+        }
+    }
+    return result;
+}
+
 int main(int argc, char *argv[])
 try
 {
     using namespace cv;
     using namespace rs2;
+
+    // Loading the SteamVR Runtime
+    vr::EVRInitError eError = vr::VRInitError_None;
+    vr::IVRSystem * m_pHMD = vr::VR_Init(&eError, vr::VRApplication_Background); // or VRApplication_Scene
+    vr::TrackedDevicePose_t devicePositions[vr::k_unMaxTrackedDeviceCount];
+
+    if (eError != vr::VRInitError_None)
+    {
+        m_pHMD = nullptr;
+        std::cout << "Unable to init VR runtime: " << vr::VR_GetVRInitErrorAsEnglishDescription(eError) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    int hmdIdx = -1;
+    int controller1Idx = -1;
+    int controller2Idx = -1;
+    int trackerIdx = -1;
+    int deviceCount = 0;
+
+    for (int deviceIdx = 0; deviceIdx < vr::k_unMaxTrackedDeviceCount; deviceIdx++)
+    {
+        if (m_pHMD->IsTrackedDeviceConnected(deviceIdx))
+        {
+            std::cout << deviceIdx << ": ";
+            switch (m_pHMD->GetTrackedDeviceClass(deviceIdx))
+            {
+            case vr::TrackedDeviceClass_Controller:
+                if (controller1Idx < 0)
+                    controller1Idx = deviceIdx;
+                else if (controller2Idx < 0)
+                    controller2Idx = deviceIdx;
+                else if (trackerIdx < 0)
+                    trackerIdx = deviceIdx;
+                std::cout << "controller";
+                break;
+            case vr::TrackedDeviceClass_HMD:
+                hmdIdx = deviceIdx;
+                std::cout << "HMD";
+                break;
+            case vr::TrackedDeviceClass_Invalid:
+                std::cout << "Invalid";
+                break;
+            case vr::TrackedDeviceClass_GenericTracker:
+                trackerIdx = deviceIdx;
+                std::cout << "Generic tracker";
+                break;
+            case vr::TrackedDeviceClass_TrackingReference:
+                std::cout << "Tracking reference";
+                break;
+            default:
+                std::cout << "default";
+                break;
+            }
+            std::cout << std::endl;
+            deviceCount = deviceIdx + 1;
+            if (hmdIdx >= 0 && controller1Idx >= 0 && controller2Idx >= 0 && trackerIdx >= 0)
+                break;
+        }
+    }
+    std::cout << "Device ids " << hmdIdx << " " << controller1Idx << " " << controller2Idx << " " << trackerIdx << " " << deviceCount << std::endl;
+    
+    float hmdPos[3], co1Pos[3], co2Pos[3];
+    auto trackerPos(devicePositions[trackerIdx].mDeviceToAbsoluteTracking.m);
+
+    // I screw the camera in on top of the vive controller, thus fixing one of the axes solid.
+    // The two remaining axes are defined by one angle - the position where the camera is screwed in tight.
+    // I determine this angle by (1) guessing the approximate value (2) tuning it by drawing controller and camera positions on screen.
+    const float phi = 2.02f;
+    const float sph = sin(phi), cph = cos(phi);
+    const salient::CameraExtrinsics color2tracker = {
+        { cph, sph, 0,
+          0, 0, -1,
+          -sph, cph, 0 },
+        { 0, 0, 0.02 }
+    };
+    salient::CameraExtrinsics color2world;
 
     // find the camera
     pipeline pipe;
@@ -148,7 +254,7 @@ try
     // Select the GPU.
     // The idea is to select a secondary, less powerfull GPU for this, so that it does not interfere with
     // the main user activity (such as playing VR).
-    cudaSetDevice(0);
+    cudaSetDevice(1);
 
     cudaStream_t mainStream;
     cudaStreamCreate(&mainStream);
@@ -227,6 +333,88 @@ try
 
     for (int frame_number = 0; waitKey(1) < 0 && getWindowProperty(window_name, WND_PROP_AUTOSIZE) >= 0; frame_number++)
     {
+        // load position matrices.
+        m_pHMD->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, devicePositions, deviceCount);
+
+        hmdPos[0] = devicePositions[hmdIdx].mDeviceToAbsoluteTracking.m[0][3];
+        hmdPos[1] = devicePositions[hmdIdx].mDeviceToAbsoluteTracking.m[1][3];
+        hmdPos[2] = devicePositions[hmdIdx].mDeviceToAbsoluteTracking.m[2][3];
+        co1Pos[0] = devicePositions[controller1Idx].mDeviceToAbsoluteTracking.m[0][3];
+        co1Pos[1] = devicePositions[controller1Idx].mDeviceToAbsoluteTracking.m[1][3];
+        co1Pos[2] = devicePositions[controller1Idx].mDeviceToAbsoluteTracking.m[2][3];
+        co2Pos[0] = devicePositions[controller2Idx].mDeviceToAbsoluteTracking.m[0][3];
+        co2Pos[1] = devicePositions[controller2Idx].mDeviceToAbsoluteTracking.m[1][3];
+        co2Pos[2] = devicePositions[controller2Idx].mDeviceToAbsoluteTracking.m[2][3];
+        
+        /*printf("HMD: %.3f %.3f %.3f\n", hmdPos[0], hmdPos[1], hmdPos[2]);
+        printf("Controller 1: %.3f %.3f %.3f\n", co1Pos[0], co1Pos[1], co1Pos[2]);
+        printf("Controller 2: %.3f %.3f %.3f\n", co2Pos[0], co2Pos[1], co2Pos[2]);
+        printf("Tracker:\n  %.3f %.3f %.3f %.3f\n  %.3f %.3f %.3f %.3f\n  %.3f %.3f %.3f %.3f\n",
+            trackerPos[0][0], trackerPos[0][1], trackerPos[0][2], trackerPos[0][3],
+            trackerPos[1][0], trackerPos[1][1], trackerPos[1][2], trackerPos[1][3],
+            trackerPos[2][0], trackerPos[2][1], trackerPos[2][2], trackerPos[2][3]);*/
+
+        for (int i = 0; i < 3; i++)
+        {
+            color2world.translation[i] = trackerPos[i][3];
+            for (int j = 0; j < 3; j++)
+            {
+                color2world.translation[i] += trackerPos[i][j] * color2tracker.translation[j];
+                color2world.rotation[i + j * 3] = 0;
+                for (int k = 0; k < 3; k++)
+                    color2world.rotation[i + j * 3] += trackerPos[i][k] * color2tracker.rotation[k + j * 3];
+            }
+        }
+        /*printf("Camera:\n  %.3f %.3f %.3f %.3f\n  %.3f %.3f %.3f %.3f\n  %.3f %.3f %.3f %.3f\n",
+            color2world.rotation[0], color2world.rotation[3], color2world.rotation[6], color2world.translation[0],
+            color2world.rotation[1], color2world.rotation[4], color2world.rotation[7], color2world.translation[1],
+            color2world.rotation[2], color2world.rotation[5], color2world.rotation[8], color2world.translation[2]);*/
+
+        float hmdPosC[3], co1PosC[3], co2PosC[3];
+        for (int i = 0; i < 3; i++)
+        {
+            hmdPosC[i] = 0;
+            co1PosC[i] = 0;
+            co2PosC[i] = 0;
+            for (int j = 0; j < 3; j++)
+            {
+                hmdPosC[i] += (hmdPos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j]; // inverse of orthogonal is transpose
+                co1PosC[i] += (co1Pos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j];
+                co2PosC[i] += (co2Pos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j];
+            }
+        }
+
+        // printf("Camera space - HMD: %.3f %.3f %.3f\n", hmdPosC[0], hmdPosC[1], hmdPosC[2]);
+        // printf("Camera space - Controller 1: %.3f %.3f %.3f\n", co1PosC[0], co1PosC[1], co1PosC[2]);
+        // printf("Camera space - Controller 2: %.3f %.3f %.3f\n", co2PosC[0], co2PosC[1], co2PosC[2]);
+
+
+        int hmdPosS[2], co1PosS[2], co2PosS[2];
+        hmdPosS[0] = (int)round(hmdPosC[0] / hmdPosC[2] * colorIntr.fx + colorIntr.ppx);
+        hmdPosS[1] = (int)round(hmdPosC[1] / hmdPosC[2] * colorIntr.fy + colorIntr.ppy);
+        co1PosS[0] = (int)round(co1PosC[0] / co1PosC[2] * colorIntr.fx + colorIntr.ppx);
+        co1PosS[1] = (int)round(co1PosC[1] / co1PosC[2] * colorIntr.fy + colorIntr.ppy);
+        co2PosS[0] = (int)round(co2PosC[0] / co2PosC[2] * colorIntr.fx + colorIntr.ppx);
+        co2PosS[1] = (int)round(co2PosC[1] / co2PosC[2] * colorIntr.fy + colorIntr.ppy);
+        // printf("Camera screen space - HMD: %d %d %.3f\n", hmdPosS[0], hmdPosS[1], hmdPosC[2]);
+        // printf("Camera screen space - Controller 1: %d %d %.3f\n", co1PosS[0], co1PosS[1], co1PosC[2]);
+        // printf("Camera screen space - Controller 2: %d %d %.3f\n", co2PosS[0], co2PosS[1], co2PosC[2]);
+
+        float depths[3];
+        int xys[6];
+        depths[0] = hmdPosC[2];
+        depths[1] = co2PosC[2];
+        depths[2] = co2PosC[2];
+        xys[0] = hmdPosS[0];
+        xys[1] = hmdPosS[1];
+        xys[2] = co1PosS[0];
+        xys[3] = co2PosS[1];
+        xys[4] = co2PosS[0];
+        xys[5] = co2PosS[1];
+
+        foregroundBounds = boundPoints(color_W, color_H, 10.0f, 3, depths, xys, colorIntr);
+
+
         // update analysis parameters from the trackbar every frame (avoiding 100500 callbacks to createTrackbar fun)
         realSalient.analysisSettings.gmmIterations = gmmIterations;
         realSalient.analysisSettings.timeAlpha = (float)timeAlpha * 0.01f;
@@ -270,11 +458,32 @@ try
         sprintf(fpsText, "FPS: %.1f", fps);
         cv::putText(foreground, fpsText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
+
+        char posText[50];
+        sprintf(posText, "          HMD: %.2f %.2f %.2f", hmdPos[0], hmdPos[1], hmdPos[2]);
+        cv::putText(foreground, posText, cv::Point(40, 70), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+        sprintf(posText, "        Con 1: %.2f %.2f %.2f", co1Pos[0], co1Pos[1], co1Pos[2]);
+        cv::putText(foreground, posText, cv::Point(40, 90), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+        sprintf(posText, "        Con 2: %.2f %.2f %.2f", co2Pos[0], co2Pos[1], co2Pos[2]);
+        cv::putText(foreground, posText, cv::Point(40, 110), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+        sprintf(posText, "      Tracker: %.2f %.2f %.2f", trackerPos[0][3], trackerPos[1][3], trackerPos[2][3]);
+        cv::putText(foreground, posText, cv::Point(40, 130), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+        sprintf(posText, "  HMD/tracker: %.2f %.2f %.2f", hmdPosC[0], hmdPosC[1], hmdPosC[2]);
+        cv::putText(foreground, posText, cv::Point(40, 150), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+        sprintf(posText, "Con 1/tracker: %.2f %.2f %.2f", co1PosC[0], co1PosC[1], co1PosC[2]);
+        cv::putText(foreground, posText, cv::Point(40, 170), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+        sprintf(posText, "Con 2/tracker: %.2f %.2f %.2f", co2PosC[0], co2PosC[1], co2PosC[2]);
+        cv::putText(foreground, posText, cv::Point(40, 190), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 200, 200), 1, cv::LINE_AA);
+
+        // show VR headset
+        cv::line(foreground, cv::Point(hmdPosS[0], hmdPosS[1]), cv::Point(co1PosS[0], co1PosS[1]), cv::Scalar(0, 0, 255), 2);
+        cv::line(foreground, cv::Point(hmdPosS[0], hmdPosS[1]), cv::Point(co2PosS[0], co2PosS[1]), cv::Scalar(0, 0, 255), 2);
+
         imshow(window_name, foreground);
 
         // update bounds given our refined labeling, assuming they don't change too much.
         // NB: in reality, it's much better to infer these bounds from the VR tracker positions.
-        foregroundBounds = realSalient.postprocessInferBounds();
+        // foregroundBounds = realSalient.postprocessInferBounds();
     }
 
     cudaStreamDestroy(mainStream);
