@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1.0)
+cmake_minimum_required(VERSION 3.17)
 project(real-salient LANGUAGES CXX CUDA VERSION 0.1.0)
 
 set (CMAKE_CXX_STANDARD 11)
@@ -11,7 +11,6 @@ target_include_directories(real-salient INTERFACE include/)
 target_compile_options(real-salient INTERFACE
   $<$<CONFIG:DEBUG>: -DCUDAERRORCHECKS > # enable cudaErrorCheck(), which syncs GPU and shows the last error
   $<$<COMPILE_LANGUAGE:CUDA>: --use_fast_math >
-  $<$<COMPILE_LANGUAGE:CXX>: -fPIC -O3 -march=native >
 )
 
 option(BUILD_EXAMPLES "Build example executables.")

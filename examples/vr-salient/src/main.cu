@@ -10,12 +10,21 @@
 #include <librealsense2/rsutil.h>
 #include <opencv2/opencv.hpp> // Include OpenCV API
 #include "salient/salient.cuh"
+#include "assets.hpp"
+#include "vulkanheadless.hpp"
 
-__global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color)
+__global__ void draw_foreground(int W, int H, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color, cudaTextureObject_t in_extra)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N)
+    //int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    //if (idx >= N)
+    //    return;
+
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= W || j >= H)
         return;
+
+    int idx = i + j * W;
 
     if (probabilities[idx] > 0.5f)
     {
@@ -29,9 +38,10 @@ __global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilit
     }
     else
     {
-        out_rgb[idx * 3 + 0] = 0;
-        out_rgb[idx * 3 + 1] = 150;
-        out_rgb[idx * 3 + 2] = 0;
+        uchar4 extra = tex2D<uchar4>(in_extra, i, j);
+        out_rgb[idx * 3 + 0] = extra.x;
+        out_rgb[idx * 3 + 1] = extra.y;
+        out_rgb[idx * 3 + 2] = extra.z;
     }
 }
 
@@ -73,13 +83,11 @@ rs2::device get_rs_device()
     try
     {
         auto dev_adv = rs400::advanced_mode::advanced_mode(dev);
-        std::ifstream settingsJSONFile("preset.json");
-        std::string settingsJSON((std::istreambuf_iterator<char>(settingsJSONFile)), std::istreambuf_iterator<char>());
-        dev_adv.load_json(settingsJSON);
+        dev_adv.load_json(std::string(assets::REALSENSE_CAMERA_SETTINGS));
     }
     catch (...)
     {
-        std::cout << "Skipped setting the camera configuration from 'preset.json'." << std::endl;
+        std::cout << "Could not load depth camera settings; yet, continue with defaults." << std::endl;
     }
     return dev;
 }
@@ -116,6 +124,14 @@ salient::SceneBounds boundPoints(const int w, const int h, const float d, const 
 int main(int argc, char *argv[])
 try
 {
+    // Select the GPU.
+    // The idea is to select a secondary, less powerfull GPU for this, so that it does not interfere with
+    // the main user activity (such as playing VR).
+    cudaSetDevice(0);
+
+    cudaStream_t mainStream;
+    cudaStreamCreate(&mainStream);
+
     using namespace cv;
     using namespace rs2;
 
@@ -181,6 +197,43 @@ try
     
     float hmdPos[3], co1Pos[3], co2Pos[3];
     auto trackerPos(devicePositions[trackerIdx].mDeviceToAbsoluteTracking.m);
+
+
+    auto vrsetup = vr::VRChaperoneSetup();
+    uint32_t chaperoneQuadsCount;
+    vrsetup->GetLiveCollisionBoundsInfo(NULL, &chaperoneQuadsCount);
+    vr::HmdQuad_t * chaperoneBounds = new vr::HmdQuad_t[chaperoneQuadsCount];
+    vrsetup->GetLiveCollisionBoundsInfo(chaperoneBounds, &chaperoneQuadsCount);
+
+    std::vector<VulkanHeadless::Vertex> vertices;
+    std::vector<uint32_t> indices;
+    //std::cout << "Chaperone quads: " << chaperoneQuadsCount << std::endl;
+    for (int i = 0; i < chaperoneQuadsCount; i++)
+    {
+        vertices.push_back({
+                { chaperoneBounds[i].vCorners[0].v[0],
+                  chaperoneBounds[i].vCorners[0].v[1],
+                  chaperoneBounds[i].vCorners[0].v[2]}, { 1.0f, 0.0f, 0.0f } });
+        vertices.push_back({
+                { chaperoneBounds[i].vCorners[1].v[0],
+                  chaperoneBounds[i].vCorners[1].v[1],
+                  chaperoneBounds[i].vCorners[1].v[2]}, { 0.0f, 1.0f, 0.0f } });
+        vertices.push_back({
+                { chaperoneBounds[i].vCorners[2].v[0],
+                  chaperoneBounds[i].vCorners[2].v[1],
+                  chaperoneBounds[i].vCorners[2].v[2]}, { 0.0f, 0.0f, 1.0f } });
+        vertices.push_back({
+                { chaperoneBounds[i].vCorners[3].v[0],
+                  chaperoneBounds[i].vCorners[3].v[1],
+                  chaperoneBounds[i].vCorners[3].v[2]}, { 0.8f, 0.8f, 0.0f } });
+        indices.push_back(i * 4);
+        indices.push_back(i * 4 + 2);
+        indices.push_back(i * 4 + 1);
+        indices.push_back(i * 4 + 3);
+        indices.push_back(i * 4 + 2);
+        indices.push_back(i * 4);
+    }
+
 
     // I screw the camera in on top of the vive controller, thus fixing one of the axes solid.
     // The two remaining axes are defined by one angle - the position where the camera is screwed in tight.
@@ -250,13 +303,6 @@ try
     // rely on the fact that we have the same representation as librealsense
     const salient::CameraExtrinsics color2depth(*reinterpret_cast<salient::CameraExtrinsics *>(&rs2_color_to_depth));
 
-    // Select the GPU.
-    // The idea is to select a secondary, less powerfull GPU for this, so that it does not interfere with
-    // the main user activity (such as playing VR).
-    cudaSetDevice(1);
-
-    cudaStream_t mainStream;
-    cudaStreamCreate(&mainStream);
 
     // original image from the color camera
     uint8_t *yuyvGPU = nullptr;
@@ -277,6 +323,9 @@ try
     };
     salient::RealSalient<3, 7, decltype(getFeature)> realSalient(
         mainStream, depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
+
+    // vulkan-to-cuda rendering
+    auto vulkanHeadless = VulkanHeadless(color_W, color_H, vertices, indices);
 
     const auto window_name = "real-salient";
     namedWindow(window_name, WINDOW_AUTOSIZE);
@@ -305,6 +354,19 @@ try
         0.1f /* float near distance meters */,
         1.5f /* float far distance meters */
     };
+
+
+    float mvMatrix[16], pMatrix[16], mvpMatrix[16];
+    memset(&mvMatrix, 0, sizeof(mvMatrix));
+    memset(&mvpMatrix, 0, sizeof(mvpMatrix));
+    memset(&pMatrix, 0, sizeof(pMatrix));
+    float veryFar = 10.0f;
+    float veryNear = 0.1f;
+    pMatrix[0] = colorIntr.fx / colorIntr.width;
+    pMatrix[5] = colorIntr.fy / colorIntr.height;
+    pMatrix[10] = (veryFar + veryNear) / (veryFar - veryNear);
+    pMatrix[11] = 1;
+    pMatrix[14] = 2 * veryFar * veryNear / (veryNear - veryFar);
 
     // Control all analysis parameters via trackbars
     int gmmIterations = realSalient.analysisSettings.gmmIterations;
@@ -370,18 +432,51 @@ try
             color2world.rotation[2], color2world.rotation[5], color2world.rotation[8], color2world.translation[2]);*/
 
         float hmdPosC[3], co1PosC[3], co2PosC[3];
+        float invt[3];
         for (int i = 0; i < 3; i++)
         {
             hmdPosC[i] = 0;
             co1PosC[i] = 0;
             co2PosC[i] = 0;
+            invt[i] = 0;
             for (int j = 0; j < 3; j++)
             {
                 hmdPosC[i] += (hmdPos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j]; // inverse of orthogonal is transpose
                 co1PosC[i] += (co1Pos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j];
                 co2PosC[i] += (co2Pos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j];
+                invt[i] += (- color2world.translation[j]) * color2world.rotation[i * 3 + j];
             }
         }
+
+        mvMatrix[0] = color2world.rotation[0];
+        mvMatrix[1] = color2world.rotation[3];
+        mvMatrix[2] = color2world.rotation[6];
+        mvMatrix[3] = 0;
+        mvMatrix[4] = color2world.rotation[1];
+        mvMatrix[5] = color2world.rotation[4];
+        mvMatrix[6] = color2world.rotation[7];
+        mvMatrix[7] = 0;
+        mvMatrix[8] = color2world.rotation[2];
+        mvMatrix[9] = color2world.rotation[5];
+        mvMatrix[10] = color2world.rotation[8];
+        mvMatrix[11] = 0;
+        mvMatrix[12] = invt[0];
+        mvMatrix[13] = invt[1];
+        mvMatrix[14] = invt[2];
+        mvMatrix[15] = 1;
+        for (int i = 0; i < 4; i++)
+        {
+            for (int j = 0; j < 4; j++)
+            {
+                mvpMatrix[i + j * 4] = 0;
+                for (int k = 0; k < 4; k++)
+                {
+                    mvpMatrix[i + j * 4] += pMatrix[i + k * 4] * mvMatrix[k + j * 4];
+                }
+            }
+        }
+
+
 
         // printf("Camera space - HMD: %.3f %.3f %.3f\n", hmdPosC[0], hmdPosC[1], hmdPosC[2]);
         // printf("Camera space - Controller 1: %.3f %.3f %.3f\n", co1PosC[0], co1PosC[1], co1PosC[2]);
@@ -434,6 +529,7 @@ try
             fps = 1 / frame_avg_time;
         frame_start_time = frame_stop_time;
 
+        vulkanHeadless.render(mvpMatrix);
         frameset data = pipe.wait_for_frames();
 
         // copy the color frame, so that getFeature gets the actual color data.
@@ -445,7 +541,10 @@ try
             (const uint16_t *)data.get_depth_frame().get_data(),
             foregroundBounds);
 
-        draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
+        // draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
+        dim3 bs(32, 32, 1);
+        draw_foreground<<<salient::distribute(dim3(color_W, color_H, 1), bs), bs, 0, mainStream>>>(color_W, color_H, rgbGPU, realSalient.probabilities, yuyvGPU, vulkanHeadless.cudaTexture);
+        
         cudaErrorCheck(mainStream);
 
         cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
@@ -491,6 +590,7 @@ try
     cudaErrorCheck(nullptr);
     cudaFree(yuyvGPU);
     cudaErrorCheck(nullptr);
+    delete chaperoneBounds;
 
     return EXIT_SUCCESS;
 }
