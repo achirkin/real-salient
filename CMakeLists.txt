@@ -1,27 +1,21 @@
 cmake_minimum_required(VERSION 3.1.0)
 project(real-salient LANGUAGES CXX CUDA VERSION 0.1.0)
 
+set (CMAKE_CXX_STANDARD 11)
+set (CMAKE_CXX_STANDARD_REQUIRED ON)
+set (CMAKE_CUDA_STANDARD 11)
+set (CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# required for the view window only
-find_package(OpenCV REQUIRED)
-
-add_executable(real-salient
-  src/main.cu
-  include/salient.cuh
-  include/gmm.cuh
-  include/crf.cuh
-  include/util.hpp)
-target_include_directories(real-salient PRIVATE include)
-target_compile_options(real-salient PRIVATE
+add_library(real-salient INTERFACE)
+target_include_directories(real-salient INTERFACE include/)
+target_compile_options(real-salient INTERFACE
   $<$<CONFIG:DEBUG>: -DCUDAERRORCHECKS > # enable cudaErrorCheck(), which syncs GPU and shows the last error
-  $<$<COMPILE_LANGUAGE:CUDA>: --use_fast_math --extended-lambda >
-  $<$<COMPILE_LANGUAGE:CXX>: -fPIC -O3 -march=native -Wall -Wpedantic -Wextra -fexceptions >
+  $<$<COMPILE_LANGUAGE:CUDA>: --use_fast_math >
+  $<$<COMPILE_LANGUAGE:CXX>: -fPIC -O3 -march=native >
 )
-set (CMAKE_CXX_STANDARD 14)
-#target_compile_features(real-salient PUBLIC cxx_std_14)
-set_target_properties(real-salient PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-target_link_libraries(real-salient realsense2 openvr_api ${OpenCV_LIBS})
 
-set(CPACK_PROJECT_NAME ${PROJECT_NAME})
-set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
+option(BUILD_EXAMPLES "Build example executables.")
 
+if(BUILD_EXAMPLES)
+	add_subdirectory (examples/vr-salient)
+endif()

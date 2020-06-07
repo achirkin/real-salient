@@ -9,8 +9,7 @@
 #include <librealsense2/rs_advanced_mode.hpp>
 #include <librealsense2/rsutil.h>
 #include <opencv2/opencv.hpp> // Include OpenCV API
-#include "util.hpp"
-#include "salient.cuh"
+#include "salient/salient.cuh"
 
 __global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color)
 {
@@ -192,7 +191,7 @@ try
         { cph, sph, 0,
           0, 0, -1,
           -sph, cph, 0 },
-        { 0, 0, 0.02 }
+        { 0, 0, 0.02f }
     };
     salient::CameraExtrinsics color2world;
 
@@ -446,7 +445,7 @@ try
             (const uint16_t *)data.get_depth_frame().get_data(),
             foregroundBounds);
 
-        draw_foreground<<<distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
+        draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
         cudaErrorCheck(mainStream);
 
         cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
