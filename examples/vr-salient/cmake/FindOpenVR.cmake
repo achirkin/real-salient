@@ -73,6 +73,7 @@ find_path(OpenVR_INCLUDE_DIR
     public/headers
     steam
     public/steam
+    openvr
   DOC "OpenVR include directory")
 mark_as_advanced(OpenVR_INCLUDE_DIR)
 

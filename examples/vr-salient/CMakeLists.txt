@@ -2,7 +2,7 @@
 list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Display window
-find_package(OpenCV REQUIRED COMPONENTS core)
+find_package(OpenCV REQUIRED COMPONENTS highgui)
 # VR tracking devices
 find_package(OpenVR REQUIRED)
 # Depth camera
@@ -49,7 +49,7 @@ target_include_directories(vr-salient
 target_link_libraries(vr-salient
   PRIVATE
     real-salient
-    opencv_core
+    opencv_highgui
     OpenVR::OpenVR
     RealSense2::RealSense2
     Vulkan::Vulkan
