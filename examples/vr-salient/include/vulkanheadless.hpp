@@ -14,11 +14,10 @@ private:
     uint32_t indexCount;
 
     uint32_t getMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags properties);
-    VkResult createBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memoryPropertyFlags, VkBuffer* buffer, VkDeviceMemory* memory, VkDeviceSize size, void* data = nullptr);
+    VkResult createBuffer(VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags memoryPropertyFlags, VkBuffer *buffer, VkDeviceMemory *memory, VkDeviceSize size, void *data = nullptr);
 
     void initCudaResources(VkDeviceSize size);
     void destroyCudaResources();
-
 
     /* Submit command buffer to a queue and wait for fence until queue operations have been finished */
     void submitWork(VkCommandBuffer cmdBuffer, VkQueue queue);
@@ -41,13 +40,15 @@ public:
 
     cudaTextureObject_t cudaTexture;
 
-    struct FrameBufferAttachment {
+    struct FrameBufferAttachment
+    {
         VkImage image;
         VkDeviceMemory memory;
         VkImageView view;
     };
 
-    struct Vertex {
+    struct Vertex
+    {
         float position[3];
     };
 
@@ -58,11 +59,8 @@ public:
 
     VkDebugReportCallbackEXT debugReportCallback{};
 
-
     VulkanHeadless(const int32_t width, const int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE] = NULL);
     ~VulkanHeadless();
 
-    void render(float * mvpMatrix);
-
-
+    void render(float *mvpMatrix);
 };

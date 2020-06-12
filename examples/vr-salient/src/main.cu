@@ -13,7 +13,7 @@
 #include "assets.hpp"
 #include "vulkanheadless.hpp"
 
-__global__ void draw_foreground(int N, uint8_t* out_rgb, const float* probabilities, const uint8_t* in_color)
+__global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
@@ -46,28 +46,29 @@ rs2::device get_rs_device()
     {
         auto devices_list = ctx.query_devices();
         size_t device_count = devices_list.size();
-        if (device_count > 0) try
-        {
-            dev = devices_list[i % device_count];
-            std::cout << "Loaded a device on attempt " << (i + 1) << "." << std::endl;
-            break;
-        }
-        catch (const std::exception &e)
-        {
-            if (i == total_attempts - 1)
+        if (device_count > 0)
+            try
             {
-                std::cout << "Could not create device - " << e.what() << "." << std::endl;
-                exit(EXIT_FAILURE);
+                dev = devices_list[i % device_count];
+                std::cout << "Loaded a device on attempt " << (i + 1) << "." << std::endl;
+                break;
             }
-        }
-        catch (...)
-        {
-            if (i == total_attempts - 1)
+            catch (const std::exception &e)
             {
-                std::cout << "Failed to created device." << std::endl;
-                exit(EXIT_FAILURE);
+                if (i == total_attempts - 1)
+                {
+                    std::cout << "Could not create device - " << e.what() << "." << std::endl;
+                    exit(EXIT_FAILURE);
+                }
             }
-        }
+            catch (...)
+            {
+                if (i == total_attempts - 1)
+                {
+                    std::cout << "Failed to created device." << std::endl;
+                    exit(EXIT_FAILURE);
+                }
+            }
         else if (i == total_attempts - 1)
         {
             std::cout << "Could not find any camera devices." << std::endl;
@@ -89,7 +90,7 @@ rs2::device get_rs_device()
     return dev;
 }
 
-salient::SceneBounds boundPoints(const int w, const int h, const float d, const int n, const float* depths, const int* xys, const salient::CameraIntrinsics camIntr)
+salient::SceneBounds boundPoints(const int w, const int h, const float d, const int n, const float *depths, const int *xys, const salient::CameraIntrinsics camIntr)
 {
     float marginTop = 0.2f;
     float marginSide = 0.5f;
@@ -130,18 +131,18 @@ try
     cudaStream_t mainStream;
     cudaStreamCreate(&mainStream);
 
-    uint8_t* deviceUUID;
+    uint8_t *deviceUUID;
     cudaDeviceProp deviceProps;
     cudaGetDeviceProperties(&deviceProps, devId);
     printf("Selected CUDA device: %s\n", deviceProps.name);
-    deviceUUID = (uint8_t*)&(deviceProps.uuid);
+    deviceUUID = (uint8_t *)&(deviceProps.uuid);
 
     using namespace cv;
     using namespace rs2;
 
     // Loading the SteamVR Runtime
     vr::EVRInitError eError = vr::VRInitError_None;
-    vr::IVRSystem * m_pHMD = vr::VR_Init(&eError, vr::VRApplication_Background); // or VRApplication_Scene
+    vr::IVRSystem *m_pHMD = vr::VR_Init(&eError, vr::VRApplication_Background); // or VRApplication_Scene
     vr::TrackedDevicePose_t devicePositions[vr::k_unMaxTrackedDeviceCount];
 
     if (eError != vr::VRInitError_None)
@@ -198,15 +199,14 @@ try
         }
     }
     std::cout << "Device ids " << hmdIdx << " " << controller1Idx << " " << controller2Idx << " " << trackerIdx << " " << deviceCount << std::endl;
-    
+
     float hmdPos[3], co1Pos[3], co2Pos[3];
     auto trackerPos(devicePositions[trackerIdx].mDeviceToAbsoluteTracking.m);
-
 
     auto vrsetup = vr::VRChaperoneSetup();
     uint32_t chaperoneQuadsCount;
     vrsetup->GetLiveCollisionBoundsInfo(NULL, &chaperoneQuadsCount);
-    vr::HmdQuad_t * chaperoneBounds = new vr::HmdQuad_t[chaperoneQuadsCount];
+    vr::HmdQuad_t *chaperoneBounds = new vr::HmdQuad_t[chaperoneQuadsCount];
     vrsetup->GetLiveCollisionBoundsInfo(chaperoneBounds, &chaperoneQuadsCount);
 
     std::vector<VulkanHeadless::Vertex> vertices;
@@ -226,22 +226,18 @@ try
                 smins[k] = min(smins[k], chaperoneBounds[i].vCorners[j].v[k]);
                 smaxs[k] = max(smaxs[k], chaperoneBounds[i].vCorners[j].v[k]);
             }
-        vertices.push_back({
-                { chaperoneBounds[i].vCorners[0].v[0],
-                  chaperoneBounds[i].vCorners[0].v[1],
-                  chaperoneBounds[i].vCorners[0].v[2]}});
-        vertices.push_back({
-                { chaperoneBounds[i].vCorners[1].v[0],
-                  chaperoneBounds[i].vCorners[1].v[1],
-                  chaperoneBounds[i].vCorners[1].v[2]}});
-        vertices.push_back({
-                { chaperoneBounds[i].vCorners[2].v[0],
-                  chaperoneBounds[i].vCorners[2].v[1],
-                  chaperoneBounds[i].vCorners[2].v[2]} });
-        vertices.push_back({
-                { chaperoneBounds[i].vCorners[3].v[0],
-                  chaperoneBounds[i].vCorners[3].v[1],
-                  chaperoneBounds[i].vCorners[3].v[2]} });
+        vertices.push_back({{chaperoneBounds[i].vCorners[0].v[0],
+                             chaperoneBounds[i].vCorners[0].v[1],
+                             chaperoneBounds[i].vCorners[0].v[2]}});
+        vertices.push_back({{chaperoneBounds[i].vCorners[1].v[0],
+                             chaperoneBounds[i].vCorners[1].v[1],
+                             chaperoneBounds[i].vCorners[1].v[2]}});
+        vertices.push_back({{chaperoneBounds[i].vCorners[2].v[0],
+                             chaperoneBounds[i].vCorners[2].v[1],
+                             chaperoneBounds[i].vCorners[2].v[2]}});
+        vertices.push_back({{chaperoneBounds[i].vCorners[3].v[0],
+                             chaperoneBounds[i].vCorners[3].v[1],
+                             chaperoneBounds[i].vCorners[3].v[2]}});
         indices.push_back(i * 4);
         indices.push_back(i * 4 + 2);
         indices.push_back(i * 4 + 1);
@@ -249,14 +245,14 @@ try
         indices.push_back(i * 4 + 2);
         indices.push_back(i * 4);
     }
-    vertices.push_back({ { smins[0], smins[1], smins[2] } });
-    vertices.push_back({ { smins[0], smins[1], smaxs[2] } });
-    vertices.push_back({ { smaxs[0], smins[1], smaxs[2] } });
-    vertices.push_back({ { smaxs[0], smins[1], smins[2] } });
-    vertices.push_back({ { smins[0], smaxs[1], smins[2] } });
-    vertices.push_back({ { smins[0], smaxs[1], smaxs[2] } });
-    vertices.push_back({ { smaxs[0], smaxs[1], smaxs[2] } });
-    vertices.push_back({ { smaxs[0], smaxs[1], smins[2] } });
+    vertices.push_back({{smins[0], smins[1], smins[2]}});
+    vertices.push_back({{smins[0], smins[1], smaxs[2]}});
+    vertices.push_back({{smaxs[0], smins[1], smaxs[2]}});
+    vertices.push_back({{smaxs[0], smins[1], smins[2]}});
+    vertices.push_back({{smins[0], smaxs[1], smins[2]}});
+    vertices.push_back({{smins[0], smaxs[1], smaxs[2]}});
+    vertices.push_back({{smaxs[0], smaxs[1], smaxs[2]}});
+    vertices.push_back({{smaxs[0], smaxs[1], smins[2]}});
     indices.push_back(chaperoneQuadsCount * 4);
     indices.push_back(chaperoneQuadsCount * 4 + 2);
     indices.push_back(chaperoneQuadsCount * 4 + 1);
@@ -270,18 +266,16 @@ try
     indices.push_back(chaperoneQuadsCount * 4 + 4);
     indices.push_back(chaperoneQuadsCount * 4 + 6);
 
-
     // I screw the camera in on top of the vive controller, thus fixing one of the axes solid.
     // The two remaining axes are defined by one angle - the position where the camera is screwed in tight.
     // I determine this angle by (1) guessing the approximate value (2) tuning it by drawing controller and camera positions on screen.
     const float phi = 2.02f;
     const float sph = sin(phi), cph = cos(phi);
     const salient::CameraExtrinsics color2tracker = {
-        { cph, sph, 0,
-          0, 0, -1,
-          -sph, cph, 0 },
-        { 0, 0, 0.02f }
-    };
+        {cph, sph, 0,
+         0, 0, -1,
+         -sph, cph, 0},
+        {0, 0, 0.02f}};
     salient::CameraExtrinsics color2world;
 
     // find the camera
@@ -339,7 +333,6 @@ try
     // rely on the fact that we have the same representation as librealsense
     const salient::CameraExtrinsics color2depth(*reinterpret_cast<salient::CameraExtrinsics *>(&rs2_color_to_depth));
 
-
     // original image from the color camera
     uint8_t *yuyvGPU = nullptr;
     cudaMalloc((void **)&yuyvGPU, sizeof(uint8_t) * color_W * color_H * 2);
@@ -391,14 +384,12 @@ try
         1.5f /* float far distance meters */
     };
 
-
     float mvMatrix[16], pMatrix[16], mvpMatrix[16];
     memset(&mvMatrix, 0, sizeof(mvMatrix));
     memset(&mvpMatrix, 0, sizeof(mvpMatrix));
     memset(&pMatrix, 0, sizeof(pMatrix));
     float veryFar = 10.0f;
     float veryNear = 0.1f;
-    float veryvery = veryFar + veryNear;
     pMatrix[0] = 2 * colorIntr.fx / colorIntr.width;
     pMatrix[5] = 2 * colorIntr.fy / colorIntr.height;
     pMatrix[10] = (veryFar + veryNear) / (veryFar - veryNear);
@@ -447,7 +438,7 @@ try
         co2Pos[0] = devicePositions[controller2Idx].mDeviceToAbsoluteTracking.m[0][3];
         co2Pos[1] = devicePositions[controller2Idx].mDeviceToAbsoluteTracking.m[1][3];
         co2Pos[2] = devicePositions[controller2Idx].mDeviceToAbsoluteTracking.m[2][3];
-        
+
         /*printf("HMD: %.3f %.3f %.3f\n", hmdPos[0], hmdPos[1], hmdPos[2]);
         printf("Controller 1: %.3f %.3f %.3f\n", co1Pos[0], co1Pos[1], co1Pos[2]);
         printf("Controller 2: %.3f %.3f %.3f\n", co2Pos[0], co2Pos[1], co2Pos[2]);
@@ -485,7 +476,7 @@ try
                 hmdPosC[i] += (hmdPos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j]; // inverse of orthogonal is transpose
                 co1PosC[i] += (co1Pos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j];
                 co2PosC[i] += (co2Pos[j] - color2world.translation[j]) * color2world.rotation[i * 3 + j];
-                invt[i] += (- color2world.translation[j]) * color2world.rotation[i * 3 + j];
+                invt[i] += (-color2world.translation[j]) * color2world.rotation[i * 3 + j];
             }
         }
 
@@ -517,12 +508,9 @@ try
             }
         }
 
-
-
         // printf("Camera space - HMD: %.3f %.3f %.3f\n", hmdPosC[0], hmdPosC[1], hmdPosC[2]);
         // printf("Camera space - Controller 1: %.3f %.3f %.3f\n", co1PosC[0], co1PosC[1], co1PosC[2]);
         // printf("Camera space - Controller 2: %.3f %.3f %.3f\n", co2PosC[0], co2PosC[1], co2PosC[2]);
-
 
         int hmdPosS[2], co1PosS[2], co2PosS[2];
         hmdPosS[0] = (int)round(hmdPosC[0] / hmdPosC[2] * colorIntr.fx + colorIntr.ppx);
@@ -548,7 +536,6 @@ try
         xys[5] = co2PosS[1];
 
         foregroundBounds = boundPoints(color_W, color_H, 10.0f, 3, depths, xys, colorIntr);
-
 
         // update analysis parameters from the trackbar every frame (avoiding 100500 callbacks to createTrackbar fun)
         realSalient.analysisSettings.gmmIterations = gmmIterations;
@@ -584,7 +571,7 @@ try
             &(vulkanHeadless.cudaTexture));
 
         draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
-        
+
         cudaErrorCheck(mainStream);
 
         cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
@@ -595,7 +582,6 @@ try
         // Show FPS
         sprintf(fpsText, "FPS: %.1f", fps);
         cv::putText(foreground, fpsText, cv::Point(20, 50), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
-
 
         char posText[50];
         sprintf(posText, "          HMD: %.2f %.2f %.2f", hmdPos[0], hmdPos[1], hmdPos[2]);
