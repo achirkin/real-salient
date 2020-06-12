@@ -38,10 +38,10 @@ __global__ void draw_foreground(int W, int H, uint8_t *out_rgb, const float *pro
     }
     else
     {
-        uchar4 extra = tex2D<uchar4>(in_extra, i, j);
-        out_rgb[idx * 3 + 0] = extra.x;
-        out_rgb[idx * 3 + 1] = extra.y;
-        out_rgb[idx * 3 + 2] = extra.z;
+        uint8_t extra = (uint8_t)max(0.0f, min(255.0f, 255.0f - tex2D<float>(in_extra, i, j) * 100.0f));
+        out_rgb[idx * 3 + 0] = extra;
+        out_rgb[idx * 3 + 1] = extra;
+        out_rgb[idx * 3 + 2] = extra;
     }
 }
 
@@ -49,12 +49,12 @@ rs2::device get_rs_device()
 {
     rs2::context ctx;
     rs2::device dev;
-    auto devices_list = ctx.query_devices();
-    size_t device_count = devices_list.size();
     const int total_attempts = 1000;
     for (int i = 0; i < total_attempts; i++)
     {
-        try
+        auto devices_list = ctx.query_devices();
+        size_t device_count = devices_list.size();
+        if (device_count > 0) try
         {
             dev = devices_list[i % device_count];
             std::cout << "Loaded a device on attempt " << (i + 1) << "." << std::endl;
@@ -75,6 +75,11 @@ rs2::device get_rs_device()
                 std::cout << "Failed to created device." << std::endl;
                 exit(EXIT_FAILURE);
             }
+        }
+        else if (i == total_attempts - 1)
+        {
+            std::cout << "Could not find any camera devices." << std::endl;
+            exit(EXIT_FAILURE);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -208,24 +213,36 @@ try
     std::vector<VulkanHeadless::Vertex> vertices;
     std::vector<uint32_t> indices;
     //std::cout << "Chaperone quads: " << chaperoneQuadsCount << std::endl;
+    float smins[3], smaxs[3];
+    for (int k = 0; k < 3; k++)
+    {
+        smins[k] = std::numeric_limits<float>::infinity();
+        smaxs[k] = -smins[k];
+    }
     for (int i = 0; i < chaperoneQuadsCount; i++)
     {
+        for (int j = 0; j < 4; j++)
+            for (int k = 0; k < 3; k++)
+            {
+                smins[k] = min(smins[k], chaperoneBounds[i].vCorners[j].v[k]);
+                smaxs[k] = max(smaxs[k], chaperoneBounds[i].vCorners[j].v[k]);
+            }
         vertices.push_back({
                 { chaperoneBounds[i].vCorners[0].v[0],
                   chaperoneBounds[i].vCorners[0].v[1],
-                  chaperoneBounds[i].vCorners[0].v[2]}, { 1.0f, 0.0f, 0.0f } });
+                  chaperoneBounds[i].vCorners[0].v[2]}});
         vertices.push_back({
                 { chaperoneBounds[i].vCorners[1].v[0],
                   chaperoneBounds[i].vCorners[1].v[1],
-                  chaperoneBounds[i].vCorners[1].v[2]}, { 0.0f, 1.0f, 0.0f } });
+                  chaperoneBounds[i].vCorners[1].v[2]}});
         vertices.push_back({
                 { chaperoneBounds[i].vCorners[2].v[0],
                   chaperoneBounds[i].vCorners[2].v[1],
-                  chaperoneBounds[i].vCorners[2].v[2]}, { 0.0f, 0.0f, 1.0f } });
+                  chaperoneBounds[i].vCorners[2].v[2]} });
         vertices.push_back({
                 { chaperoneBounds[i].vCorners[3].v[0],
                   chaperoneBounds[i].vCorners[3].v[1],
-                  chaperoneBounds[i].vCorners[3].v[2]}, { 0.8f, 0.8f, 0.0f } });
+                  chaperoneBounds[i].vCorners[3].v[2]} });
         indices.push_back(i * 4);
         indices.push_back(i * 4 + 2);
         indices.push_back(i * 4 + 1);
@@ -233,6 +250,26 @@ try
         indices.push_back(i * 4 + 2);
         indices.push_back(i * 4);
     }
+    vertices.push_back({ { smins[0], smins[1], smins[2] } });
+    vertices.push_back({ { smins[0], smins[1], smaxs[2] } });
+    vertices.push_back({ { smaxs[0], smins[1], smaxs[2] } });
+    vertices.push_back({ { smaxs[0], smins[1], smins[2] } });
+    vertices.push_back({ { smins[0], smaxs[1], smins[2] } });
+    vertices.push_back({ { smins[0], smaxs[1], smaxs[2] } });
+    vertices.push_back({ { smaxs[0], smaxs[1], smaxs[2] } });
+    vertices.push_back({ { smaxs[0], smaxs[1], smins[2] } });
+    indices.push_back(chaperoneQuadsCount * 4);
+    indices.push_back(chaperoneQuadsCount * 4 + 2);
+    indices.push_back(chaperoneQuadsCount * 4 + 1);
+    indices.push_back(chaperoneQuadsCount * 4 + 3);
+    indices.push_back(chaperoneQuadsCount * 4 + 2);
+    indices.push_back(chaperoneQuadsCount * 4);
+    indices.push_back(chaperoneQuadsCount * 4 + 4);
+    indices.push_back(chaperoneQuadsCount * 4 + 5);
+    indices.push_back(chaperoneQuadsCount * 4 + 6);
+    indices.push_back(chaperoneQuadsCount * 4 + 7);
+    indices.push_back(chaperoneQuadsCount * 4 + 4);
+    indices.push_back(chaperoneQuadsCount * 4 + 6);
 
 
     // I screw the camera in on top of the vive controller, thus fixing one of the axes solid.
@@ -362,20 +399,25 @@ try
     memset(&pMatrix, 0, sizeof(pMatrix));
     float veryFar = 10.0f;
     float veryNear = 0.1f;
-    pMatrix[0] = colorIntr.fx / colorIntr.width;
-    pMatrix[5] = colorIntr.fy / colorIntr.height;
+    float veryvery = veryFar + veryNear;
+    pMatrix[0] = 2 * colorIntr.fx / colorIntr.width;
+    pMatrix[5] = 2 * colorIntr.fy / colorIntr.height;
     pMatrix[10] = (veryFar + veryNear) / (veryFar - veryNear);
     pMatrix[11] = 1;
     pMatrix[14] = 2 * veryFar * veryNear / (veryNear - veryFar);
+    for (int i = 0; i < 4; i++)
+    {
+        printf("\t%.3f %.3f %.3f %.3f\n", pMatrix[i + 0], pMatrix[i + 4], pMatrix[i + 8], pMatrix[i + 12]);
+    }
 
     // Control all analysis parameters via trackbars
-    int gmmIterations = realSalient.analysisSettings.gmmIterations;
+    int gmmIterations = 5; // realSalient.analysisSettings.gmmIterations;
     createTrackbar("GMM iterations", window_name, &gmmIterations, 100);
     int timeAlpha = (int)round(realSalient.analysisSettings.timeAlpha * 100);
     createTrackbar("GMM EMA α (x100)", window_name, &timeAlpha, 100);
     int imputedLabelWeight = (int)round(realSalient.analysisSettings.imputedLabelWeight * 100);
     createTrackbar("Imputed label weight (x100)", window_name, &imputedLabelWeight, 100);
-    int crfIterations = realSalient.analysisSettings.crfIterations;
+    int crfIterations = 3; // realSalient.analysisSettings.crfIterations;
     createTrackbar("CRF iterations", window_name, &crfIterations, 20);
     int smoothnessWeight = (int)round(realSalient.analysisSettings.smoothnessWeight * 10);
     createTrackbar("CRF smoothness weight (x10)", window_name, &smoothnessWeight, 200);

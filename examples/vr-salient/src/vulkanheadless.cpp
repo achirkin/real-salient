@@ -642,7 +642,7 @@ void VulkanHeadless::initCudaResources(VkDeviceSize size)
 
     cudaExternalMemoryMipmappedArrayDesc vulkan_mipmap_desc;
     vulkan_mipmap_desc.offset = 0;
-    vulkan_mipmap_desc.formatDesc = cudaCreateChannelDesc(8, 8, 8, 8, cudaChannelFormatKindUnsigned);
+    vulkan_mipmap_desc.formatDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
     vulkan_mipmap_desc.extent.depth = 0;
     vulkan_mipmap_desc.extent.width = width;
     vulkan_mipmap_desc.extent.height = height;
@@ -700,7 +700,7 @@ void VulkanHeadless::render(float* mvpMatrix)
     VK_CHECK_RESULT(vkBeginCommandBuffer(commandBuffer, &cmdBufInfo));
 
     VkClearValue clearValues[2];
-    clearValues[0].color = { { 0.0f, 0.0f, 0.2f, 1.0f } };
+    clearValues[0].color = { { 100.0f, 0.0f, 0.0f, 0.0f } };
     clearValues[1].depthStencil = { 1.0f, 0 };
 
     VkRenderPassBeginInfo renderPassBeginInfo = {};
@@ -958,7 +958,8 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
         /*
             Create framebuffer attachments
         */
-        VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        // VK_FORMAT_R8G8B8A8_UNORM;
+        VkFormat colorFormat = VK_FORMAT_R32_SFLOAT; // NB: this format is not mandatory, so fail for some
         VkFormat depthFormat;
         vks::tools::getSupportedDepthFormat(physicalDevice, &depthFormat);
         {
@@ -973,7 +974,7 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
             image.arrayLayers = 1;
             image.samples = VK_SAMPLE_COUNT_1_BIT;
             image.tiling = VK_IMAGE_TILING_OPTIMAL; // important for the mapping!
-            image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT; // TODO: remove transfer?..
+            image.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
             
             VkExternalMemoryImageCreateInfoKHR extImageCreateInfo = {};
             extImageCreateInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO_KHR;
@@ -1195,8 +1196,7 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
 
             // Attribute descriptions
             std::vector<VkVertexInputAttributeDescription> vertexInputAttributes = {
-                vks::initializers::vertexInputAttributeDescription(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0),					// Position
-                vks::initializers::vertexInputAttributeDescription(0, 1, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3),	// Color
+                vks::initializers::vertexInputAttributeDescription(0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0)	// Position
             };
 
             VkPipelineVertexInputStateCreateInfo vertexInputState = vks::initializers::pipelineVertexInputStateCreateInfo();

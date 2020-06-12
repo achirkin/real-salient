@@ -58,6 +58,6 @@ target_link_libraries(vr-salient
 
 add_custom_command ( TARGET vr-salient POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    $<TARGET_FILE:opencv_core> $<TARGET_FILE:OpenVR::OpenVR> $<TARGET_FILE:RealSense2::RealSense2>
+    $<TARGET_FILE:opencv_highgui> $<TARGET_FILE:OpenVR::OpenVR> $<TARGET_FILE:RealSense2::RealSense2>
     $<TARGET_FILE_DIR:vr-salient>
 )

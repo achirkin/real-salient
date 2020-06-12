@@ -49,7 +49,6 @@ public:
 
     struct Vertex {
         float position[3];
-        float color[3];
     };
 
     const int32_t width, height;
