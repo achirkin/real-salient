@@ -59,7 +59,7 @@ public:
     VkDebugReportCallbackEXT debugReportCallback{};
 
 
-    VulkanHeadless(const int32_t width, const int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices);
+    VulkanHeadless(const int32_t width, const int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE] = NULL);
     ~VulkanHeadless();
 
     void render(float * mvpMatrix);

@@ -124,10 +124,17 @@ try
     // Select the GPU.
     // The idea is to select a secondary, less powerfull GPU for this, so that it does not interfere with
     // the main user activity (such as playing VR).
-    cudaSetDevice(0);
+    int devId = 1;
+    cudaSetDevice(devId);
 
     cudaStream_t mainStream;
     cudaStreamCreate(&mainStream);
+
+    uint8_t* deviceUUID;
+    cudaDeviceProp deviceProps;
+    cudaGetDeviceProperties(&deviceProps, devId);
+    printf("Selected CUDA device: %s\n", deviceProps.name);
+    deviceUUID = (uint8_t*)&(deviceProps.uuid);
 
     using namespace cv;
     using namespace rs2;
@@ -354,7 +361,7 @@ try
         mainStream, depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
 
     // vulkan-to-cuda rendering
-    auto vulkanHeadless = VulkanHeadless(W, H, vertices, indices);
+    auto vulkanHeadless = VulkanHeadless(W, H, vertices, indices, deviceUUID);
 
     const auto window_name = "real-salient";
     namedWindow(window_name, WINDOW_AUTOSIZE);

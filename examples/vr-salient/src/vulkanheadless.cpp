@@ -748,7 +748,7 @@ void VulkanHeadless::render(float* mvpMatrix)
     vkDeviceWaitIdle(device);
 }
 
-VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices)
+VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE])
     : width(width), height(height)
 {
         LOG("Running headless rendering example\n");
@@ -827,11 +827,26 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
         VK_CHECK_RESULT(vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr));
         std::vector<VkPhysicalDevice> physicalDevices(deviceCount);
         VK_CHECK_RESULT(vkEnumeratePhysicalDevices(instance, &deviceCount, physicalDevices.data()));
-        physicalDevice = physicalDevices[0];
 
-        VkPhysicalDeviceProperties deviceProperties;
-        vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
-        LOG("GPU: %s\n", deviceProperties.deviceName);
+        int devId = 0;
+        if (requestedUUID != NULL) {
+            VkPhysicalDeviceIDProperties deviceIDProperties;
+            VkPhysicalDeviceProperties2 deviceProperties2;
+            deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            deviceProperties2.pNext = &deviceIDProperties;
+            deviceIDProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+            deviceIDProperties.pNext = NULL;
+            for (int i = 0; i < deviceCount; i++)
+            {
+                vkGetPhysicalDeviceProperties2(physicalDevices[i], &deviceProperties2);
+                if (memcmp(requestedUUID, deviceIDProperties.deviceUUID, VK_UUID_SIZE) == 0)
+                {
+                    devId = i;
+                    break;
+                }
+            }
+        }
+        physicalDevice = physicalDevices[devId];
 
         // Request a single graphics queue
         const float defaultQueuePriority(0.0f);
