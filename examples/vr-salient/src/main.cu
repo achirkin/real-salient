@@ -13,18 +13,11 @@
 #include "assets.hpp"
 #include "vulkanheadless.hpp"
 
-__global__ void draw_foreground(int W, int H, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color, cudaTextureObject_t in_extra)
+__global__ void draw_foreground(int N, uint8_t* out_rgb, const float* probabilities, const uint8_t* in_color)
 {
-    //int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    //if (idx >= N)
-    //    return;
-
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
-    if (i >= W || j >= H)
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N)
         return;
-
-    int idx = i + j * W;
 
     if (probabilities[idx] > 0.5f)
     {
@@ -38,10 +31,9 @@ __global__ void draw_foreground(int W, int H, uint8_t *out_rgb, const float *pro
     }
     else
     {
-        uint8_t extra = (uint8_t)max(0.0f, min(255.0f, 255.0f - tex2D<float>(in_extra, i, j) * 100.0f));
-        out_rgb[idx * 3 + 0] = extra;
-        out_rgb[idx * 3 + 1] = extra;
-        out_rgb[idx * 3 + 2] = extra;
+        out_rgb[idx * 3 + 0] = 0;
+        out_rgb[idx * 3 + 1] = 150;
+        out_rgb[idx * 3 + 2] = 0;
     }
 }
 
@@ -362,7 +354,7 @@ try
         mainStream, depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
 
     // vulkan-to-cuda rendering
-    auto vulkanHeadless = VulkanHeadless(color_W, color_H, vertices, indices);
+    auto vulkanHeadless = VulkanHeadless(W, H, vertices, indices);
 
     const auto window_name = "real-salient";
     namedWindow(window_name, WINDOW_AUTOSIZE);
@@ -581,11 +573,10 @@ try
         // load frames to gpu and preprocess
         realSalient.processFrames(
             (const uint16_t *)data.get_depth_frame().get_data(),
-            foregroundBounds);
+            foregroundBounds,
+            &(vulkanHeadless.cudaTexture));
 
-        // draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
-        dim3 bs(32, 32, 1);
-        draw_foreground<<<salient::distribute(dim3(color_W, color_H, 1), bs), bs, 0, mainStream>>>(color_W, color_H, rgbGPU, realSalient.probabilities, yuyvGPU, vulkanHeadless.cudaTexture);
+        draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
         
         cudaErrorCheck(mainStream);
 

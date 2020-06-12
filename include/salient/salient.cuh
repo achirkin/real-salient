@@ -154,7 +154,7 @@ namespace salient
         void loadColorFrame();
 
         /** Use the earlier initialized depth data to initialize labels. */
-        void buildLabels(const SceneBounds foreground_bounds);
+        void buildLabels(const SceneBounds foreground_bounds, const cudaTextureObject_t* renderedDepth = nullptr);
 
         /** Run all models on the current frame. */
         void runModels();
@@ -287,10 +287,12 @@ namespace salient
          * @param foreground_bounds cutoff near and far distance in meters and min/max x/y pixel positions in the space of the color camera.
          * @param gmmIterations number of iterations in EM estimation algorithm for GMMs.
          * @param crfIterations number of passes in CRF inference.
+         * @param renderedDepth optional texture objects that helps to cut-off near salient object from far background on per-pixel basis; it's size must be equal to the downscaled color frame.
          */
         void processFrames(
             const uint16_t *host_depth_buffer,
-            const SceneBounds foreground_bounds);
+            const SceneBounds foreground_bounds,
+            const cudaTextureObject_t * renderedDepth = nullptr);
 
         /**
          * Try to infer bounds on the salient object (foreground).
@@ -502,12 +504,16 @@ namespace salient
         float *out_depth,
         const float depthScale,
         const SceneBounds foreground_bounds,
-        const salient::FrameTransform color2depth)
+        const salient::FrameTransform color2depth,
+        const cudaTextureObject_t renderedDepth,
+        const bool withDepthThreshold)
     {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
         const int j = blockIdx.y * blockDim.y + threadIdx.y;
         if (i >= W || j >= H)
             return;
+
+        float pfar = withDepthThreshold ? min(tex2D<float>(renderedDepth, i, j), foreground_bounds.far) : foreground_bounds.far;
 
         const bool inBounds =
             downsampleRatio * i >= foreground_bounds.left &&
@@ -517,7 +523,7 @@ namespace salient
         float di = (float)i;
         float dj = (float)j;
         float dx, dy;
-        float depth = max(0.3f, 0.5f * (foreground_bounds.far + foreground_bounds.near));
+        float depth = max(0.3f, 0.5f * (pfar + foreground_bounds.near));
         // get approximate depth first
         color2depth.transform(di, dj, depth, dx, dy);
         depth = tex2D<float>(depthInterpTex, dx, dy);
@@ -528,7 +534,7 @@ namespace salient
         if (depth > 0)
         {
             out_depth[i + j * W] = depth;
-            out_labels[i + j * W] = (!inBounds || depth > foreground_bounds.far || depth < foreground_bounds.near) ? 1 : 0;
+            out_labels[i + j * W] = (!inBounds || depth > pfar || depth < foreground_bounds.near) ? 1 : 0;
         }
         else
         {
@@ -602,10 +608,11 @@ namespace salient
     }
 
     template <int C, int GaussianK, class GetFeature>
-    void RealSalient<C, GaussianK, GetFeature>::buildLabels(const SceneBounds foreground_bounds)
+    void RealSalient<C, GaussianK, GetFeature>::buildLabels(const SceneBounds foreground_bounds, const cudaTextureObject_t* renderedDepth)
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
-        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(), aligned_depth, depthScale, foreground_bounds, color2depth);
+        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(), aligned_depth, depthScale, foreground_bounds, color2depth,
+            *renderedDepth, renderedDepth != nullptr);
         cudaErrorCheck(mainStream);
         labels_impute<X><<<distribute(dimWork, enlargeSquare(squareBlockSize, X)), squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
         cudaErrorCheck(mainStream);
@@ -681,11 +688,11 @@ namespace salient
     }
 
     template <int C, int GaussianK, class GetFeature>
-    void RealSalient<C, GaussianK, GetFeature>::processFrames(const uint16_t *host_depth_buffer, const SceneBounds foreground_bounds)
+    void RealSalient<C, GaussianK, GetFeature>::processFrames(const uint16_t *host_depth_buffer, const SceneBounds foreground_bounds, const cudaTextureObject_t *renderedDepth)
     {
         loadDepthFrame(host_depth_buffer);
         loadColorFrame();
-        buildLabels(foreground_bounds);
+        buildLabels(foreground_bounds, renderedDepth);
         runModels();
 
         auto lhoodPtr = analysisSettings.crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
