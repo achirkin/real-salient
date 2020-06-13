@@ -531,10 +531,14 @@ namespace salient
         if (depth > 0.01f)
             color2depth.transform(di, dj, depth, dx, dy);
         depth = tex2D<uint16_t>(depthTex, dx, dy) * depthScale;
+        int8_t label_base;
         if (depth > 0)
         {
             out_depth[i + j * W] = depth;
-            out_labels[i + j * W] = (!inBounds || depth > pfar || depth < foreground_bounds.near) ? 1 : 0;
+            label_base = (!inBounds || depth > pfar || depth < foreground_bounds.near) ? 1 : 0;
+            if (abs(depth - pfar) < (depth + pfar) * 0.05f)
+                label_base -= 0x80; // make the label appear imputed if depth is too close to the threshold
+            out_labels[i + j * W] = label_base;
         }
         else
         {
@@ -567,7 +571,7 @@ namespace salient
         for (int w = w0; w < W && w < w0 + D; w++)
 #pragma unfold
             for (int h = h0; h < H && h < h0 + D; h++)
-                common_label = match_labels(common_label, labels[h * W + w]);
+                common_label = match_labels(common_label, labels[h * W + w] & 0x7F); // use both GT and imputed data.
         unsigned int t = blockDim.x;
         sdata[(t + threadIdx.y) * t + threadIdx.x] = common_label;
         __syncthreads();
