@@ -251,7 +251,7 @@ namespace salient
         template <int C, int K, int M>
         void GaussianMixtures<C, K, M>::expectationStep()
         {
-            expectationKernel<C, K, M> << <blocksForN, blockSizeForN, 0, mainStream >> > (N, features, labels, means, covs_inv, mixture_weights, probs_weights);
+            expectationKernel<C, K, M><<<blocksForN, blockSizeForN, 0, mainStream>>>(N, features, labels, means, covs_inv, mixture_weights, probs_weights);
             cudaErrorCheck(mainStream);
         }
 
@@ -617,15 +617,15 @@ namespace salient
 
             // calculate mixture_weights
             shared_size = sizeof(float) * blockSizeForN * M;
-            maximization_aggregateWeights<K, M> << <blocks, blockSizeForN, shared_size, mainStream >> > (N, labels, probs_weights, aggr_temp, imputed_weight);
+            maximization_aggregateWeights<K, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, labels, probs_weights, aggr_temp, imputed_weight);
             shared_size = sizeof(float) * blocks * M;
-            aggregateN<K, M> << <1, blocks, shared_size, mainStream >> > (aggr_temp, mixture_weights);
+            aggregateN<K, M><<<1, blocks, shared_size, mainStream>>>(aggr_temp, mixture_weights);
 
             // calculate means
             shared_size = sizeof(float) * blockSizeForN * M * C;
-            maximization_aggregateMeans<C, K, M> << <blocks, blockSizeForN, shared_size, mainStream >> > (N, features, labels, probs_weights, mixture_weights, aggr_temp, imputed_weight);
+            maximization_aggregateMeans<C, K, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, features, labels, probs_weights, mixture_weights, aggr_temp, imputed_weight);
             shared_size = sizeof(float) * blocks * M * C;
-            aggregateN<K, M* C> << <1, blocks, shared_size, mainStream >> > (aggr_temp, means);
+            aggregateN<K, M* C><<<1, blocks, shared_size, mainStream>>>(aggr_temp, means);
 
             // fix bad components by looking for too small or repeating weights
             cudaMemcpyAsync(cpu_mixture_weights_temp, mixture_weights, sizeof(float) * MK, cudaMemcpyDeviceToHost, mainStream);
@@ -660,9 +660,9 @@ namespace salient
 
             // calculate covariance matrices
             shared_size = sizeof(float) * blockSizeForN * M * CC;
-            maximization_aggregateCovs<C, K, M> << <blocks, blockSizeForN, shared_size, mainStream >> > (N, features, labels, probs_weights, mixture_weights, means, aggr_temp, imputed_weight);
+            maximization_aggregateCovs<C, K, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, features, labels, probs_weights, mixture_weights, means, aggr_temp, imputed_weight);
             shared_size = sizeof(float) * blocks * M * CC;
-            aggregateN<K, M* CC> << <1, blocks, shared_size, mainStream >> > (aggr_temp, covs);
+            aggregateN<K, M* CC><<<1, blocks, shared_size, mainStream>>>(aggr_temp, covs);
             cudaErrorCheck(mainStream);
 
             // update current and longterm model parameters if necessary.
@@ -671,7 +671,7 @@ namespace salient
                 int MK2 = 1;
                 while (MK2 < MK)
                     MK2 <<= 1;
-                maximization_doMovingAverage<C> << <1, MK2, 0, mainStream >> > (MK, alpha,
+                maximization_doMovingAverage<C><<<1, MK2, 0, mainStream>>>(MK, alpha,
                     mixture_weights, mixture_weights_longterm,
                     means, means_longterm,
                     covs, covs_longterm);
@@ -680,7 +680,7 @@ namespace salient
 
             // calculate inverse covariance matrices and determinants.
             const int matricesPerBlock(BLOCK_SIZE / C);
-            covariance_solve<C, MK> << <distribute(MK, matricesPerBlock), BLOCK_SIZE, BLOCK_SIZE * sizeof(float), mainStream >> > (covs, covs_inv, covs_det);
+            covariance_solve<C, MK><<<distribute(MK, matricesPerBlock), BLOCK_SIZE, BLOCK_SIZE * sizeof(float), mainStream>>>(covs, covs_inv, covs_det);
             cudaErrorCheck(mainStream);
         }
 
@@ -843,12 +843,12 @@ namespace salient
             const int blocks(min(N, blockSizeForN)); // make sure there are less than blockSizeForN blocks
             int shared_size;
             shared_size = sizeof(float) * blockSizeForN * M * C * 2;
-            initModels_minmax1<C, M> << <blocks, blockSizeForN, shared_size, mainStream >> > (N, features, labels, aggr_temp);
+            initModels_minmax1<C, M><<<blocks, blockSizeForN, shared_size, mainStream>>>(N, features, labels, aggr_temp);
             cudaErrorCheck(mainStream);
             shared_size = sizeof(float) * blocks * M * C * 2;
-            initModels_minmax2<C, M> << <1, blocks, shared_size, mainStream >> > (aggr_temp);
+            initModels_minmax2<C, M><<<1, blocks, shared_size, mainStream>>>(aggr_temp);
             cudaErrorCheck(mainStream);
-            initModelsKernel<C, K, M> << <1, BLOCK_SIZE, 0, mainStream >> > (aggr_temp, mixture_weights, means, covs_inv, covs_det);
+            initModelsKernel<C, K, M><<<1, BLOCK_SIZE, 0, mainStream>>>(aggr_temp, mixture_weights, means, covs_inv, covs_det);
             cudaErrorCheck(mainStream);
         }
 
@@ -913,7 +913,7 @@ namespace salient
         template <int C, int K, int M>
         void GaussianMixtures<C, K, M>::infer()
         {
-            inferKernel<C, K, M> << <blocksForN, blockSizeForN, 0, mainStream >> > (N, features, labels, means, covs_inv, covs_det, llhoods);
+            inferKernel<C, K, M><<<blocksForN, blockSizeForN, 0, mainStream>>>(N, features, labels, means, covs_inv, covs_det, llhoods);
         }
 
     } // namespace gmm
