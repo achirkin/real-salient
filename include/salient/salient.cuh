@@ -564,6 +564,7 @@ namespace salient
         // -2 means contradiction
         // other value means all are either not specified or that class.
         int8_t common_label = -1;
+        int8_t label_tmp;
         int w0 = (blockIdx.x * blockDim.x + threadIdx.x) << X;
         int h0 = (blockIdx.y * blockDim.y + threadIdx.y) << X;
         const int D(1 << X);
@@ -571,7 +572,11 @@ namespace salient
         for (int w = w0; w < W && w < w0 + D; w++)
 #pragma unfold
             for (int h = h0; h < H && h < h0 + D; h++)
-                common_label = match_labels(common_label, labels[h * W + w] & 0x7F); // use both GT and imputed data.
+            {
+                label_tmp = labels[h * W + w];
+                label_tmp = (label_tmp == -1) ? label_tmp : (label_tmp & 0x7F); // use both GT and imputed data.
+                common_label = match_labels(common_label, label_tmp);
+            }
         unsigned int t = blockDim.x;
         sdata[(t + threadIdx.y) * t + threadIdx.x] = common_label;
         __syncthreads();
