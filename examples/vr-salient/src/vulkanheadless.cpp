@@ -1,17 +1,37 @@
-/* NBs:
-
-https://stackoverflow.com/a/55547739
-https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EXTRES__INTEROP.html#group__CUDART__EXTRES__INTEROP_1g0012448b208196bc60c2307eaeaa3ff7
-https://github.com/NVIDIA/cuda-samples/blob/master/Samples/simpleVulkan/vulkanCUDASinewave.cu
-
-*/
-
 /*
-* Vulkan Example - Minimal headless rendering example
-*
-* Copyright (C) 2017 by Sascha Willems - www.saschawillems.de
-*
-* This code is licensed under the MIT license (MIT) (http://opensource.org/licenses/MIT)
+
+current version: Artem Chirkin
+
+Parts of logic are interpreted from:
+  - https://stackoverflow.com/a/55547739
+  - https://github.com/NVIDIA/cuda-samples/blob/master/Samples/simpleVulkan/main.cpp
+
+Most of the code below is copied from the link below and was heavily modified since then.
+
+Original author and license:
+
+https://github.com/SaschaWillems/Vulkan/blob/master/examples/renderheadless/renderheadless.cpp
+
+Vulkan Example - Minimal headless rendering example
+
+Copyright (C) 2017 by Sascha Willems - www.saschawillems.de
+
+The MIT License (MIT)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+and associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE
+AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 */
 
 #include <stdio.h>
@@ -583,6 +603,47 @@ namespace vks
             cudaErrorCheck();
             return externalMem;
         }
+
+        /** Get CUDA semaphore object for a VkSemaphore */
+        cudaExternalSemaphore_t getVkCudaSemaphore(VkDevice device, VkSemaphore sem)
+        {
+            cudaExternalSemaphore_t externalSem;
+
+            cudaExternalSemaphoreHandleDesc hDesc = {};
+            memset(&hDesc, 0, sizeof(hDesc));
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32)
+            hDesc.type = cudaExternalSemaphoreHandleTypeOpaqueWin32;
+            VkSemaphoreGetWin32HandleInfoKHR hInfo = {};
+            hInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR;
+            hInfo.semaphore = sem;
+            hInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+            PFN_vkGetSemaphoreWin32HandleKHR func = (PFN_vkGetSemaphoreWin32HandleKHR)vkGetDeviceProcAddr(device, "vkGetSemaphoreWin32HandleKHR");
+#else
+            hDesc.type = cudaExternalSemaphoreHandleTypeOpaqueFd;
+            VkSemaphoreGetFdInfoKHR hInfo = {};
+            hInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+            hInfo.semaphore = sem;
+            hInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+            PFN_vkGetSemaphoreFdKHR func = (PFN_vkGetSemaphoreFdKHR)vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR");
+#endif
+            if (func == NULL)
+            {
+                std::cout << "Failed to locate function vkGetSemaphoreXxxKHR" << std::endl;
+                assert(false);
+            }
+            hInfo.pNext = NULL;
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32)
+            VK_CHECK_RESULT(func(device, &hInfo, &(hDesc.handle.win32.handle)));
+#else
+            VK_CHECK_RESULT(func(device, &hInfo, &(hDesc.handle.fd)));
+#endif
+            cudaImportExternalSemaphore(&externalSem, &hDesc);
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32)
+            CloseHandle(hDesc.handle.win32.handle);
+#endif
+            cudaErrorCheck();
+            return externalSem;
+        }
     } // namespace tools
 } // namespace vks
 
@@ -635,6 +696,7 @@ VkResult VulkanHeadless::createBuffer(VkBufferUsageFlags usageFlags, VkMemoryPro
 void VulkanHeadless::initCudaResources(VkDeviceSize size)
 {
     cudaExtMemory = vks::tools::getVkCudaMemory(device, colorAttachment.memory, size);
+    cudaExtSemaphore = vks::tools::getVkCudaSemaphore(device, vulkanRenderingDone);
 
     cudaExternalMemoryMipmappedArrayDesc vulkan_mipmap_desc;
     vulkan_mipmap_desc.offset = 0;
@@ -673,6 +735,8 @@ void VulkanHeadless::destroyCudaResources()
     cudaErrorCheck();
     cudaDestroyExternalMemory(cudaExtMemory);
     cudaErrorCheck();
+    cudaDestroyExternalSemaphore(cudaExtSemaphore);
+    cudaErrorCheck();
 }
 
 void VulkanHeadless::submitWork(VkCommandBuffer cmdBuffer, VkQueue queue)
@@ -688,59 +752,59 @@ void VulkanHeadless::submitWork(VkCommandBuffer cmdBuffer, VkQueue queue)
     vkDestroyFence(device, fence, nullptr);
 }
 
-void VulkanHeadless::render(float *mvpMatrix)
+
+void VulkanHeadless::prepareRenderStructs()
 {
-    VkCommandBufferBeginInfo cmdBufInfo =
-        vks::initializers::commandBufferBeginInfo();
+    renderCmdBufBeginInfo = vks::initializers::commandBufferBeginInfo();
 
-    VK_CHECK_RESULT(vkBeginCommandBuffer(commandBuffer, &cmdBufInfo));
+    renderClearValues[0].color = { {100.0f, 0.0f, 0.0f, 0.0f} };
+    renderClearValues[1].depthStencil = { 1.0f, 0 };
 
-    VkClearValue clearValues[2];
-    clearValues[0].color = {{100.0f, 0.0f, 0.0f, 0.0f}};
-    clearValues[1].depthStencil = {1.0f, 0};
-
-    VkRenderPassBeginInfo renderPassBeginInfo = {};
     renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassBeginInfo.renderArea.extent.width = width;
     renderPassBeginInfo.renderArea.extent.height = height;
     renderPassBeginInfo.clearValueCount = 2;
-    renderPassBeginInfo.pClearValues = clearValues;
+    renderPassBeginInfo.pClearValues = renderClearValues;
     renderPassBeginInfo.renderPass = renderPass;
     renderPassBeginInfo.framebuffer = framebuffer;
 
-    vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-    VkViewport viewport = {};
     viewport.height = (float)height;
     viewport.width = (float)width;
     viewport.minDepth = (float)0.0f;
     viewport.maxDepth = (float)1.0f;
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-    // Update dynamic scissor state
-    VkRect2D scissor = {};
     scissor.extent.width = width;
     scissor.extent.height = height;
+
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = &vulkanRenderingDone;
+
+    waitParams.flags = 0;
+    waitParams.params.fence.value = 0;
+}
+
+
+void VulkanHeadless::render(float *mvpMatrix, cudaStream_t stream)
+{
+    VK_CHECK_RESULT(vkBeginCommandBuffer(commandBuffer, &renderCmdBufBeginInfo));
+    vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    // Update dynamic scissor state
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
     // Render scene
-    VkDeviceSize offsets[1] = {0};
-    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, offsets);
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, vertexBufferOffsets);
     vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
     vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16, mvpMatrix);
-
     vkCmdDrawIndexed(commandBuffer, indexCount, 1, 0, 0, 0);
-
     vkCmdEndRenderPass(commandBuffer);
-
     VK_CHECK_RESULT(vkEndCommandBuffer(commandBuffer));
-
-    submitWork(commandBuffer, queue);
-
-    vkDeviceWaitIdle(device);
+    VK_CHECK_RESULT(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
+    cudaWaitExternalSemaphoresAsync(&cudaExtSemaphore, &waitParams, 1, stream);
+    cudaErrorCheck();
 }
 
 VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE])
@@ -1023,6 +1087,30 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
         VK_CHECK_RESULT(vkAllocateMemory(device, &memAlloc, nullptr, &colorAttachment.memory));
         VK_CHECK_RESULT(vkBindImageMemory(device, colorAttachment.image, colorAttachment.memory, 0));
 
+        // prepare a semaphore for rendering
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VkExportSemaphoreCreateInfoKHR exportSemaphoreCreateInfo = {};
+        exportSemaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO_KHR;
+        exportSemaphoreCreateInfo.pNext = NULL;
+
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32)
+        exportSemaphoreCreateInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        // uncomment the following to allow sharing in the multiprocess setting on windows.
+        //WindowsSecurityAttributes winSecurityAttributes;
+        //VkExportSemaphoreWin32HandleInfoKHR exportSemaphoreWin32HandleInfoKHR = {};
+        //exportSemaphoreWin32HandleInfoKHR.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
+        //exportSemaphoreWin32HandleInfoKHR.pNext = NULL;
+        //exportSemaphoreWin32HandleInfoKHR.pAttributes = &winSecurityAttributes;
+        //exportSemaphoreWin32HandleInfoKHR.dwAccess = DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE;
+        //exportSemaphoreWin32HandleInfoKHR.name = (LPCWSTR)NULL;
+        //exportSemaphoreCreateInfo.pNext = (handleType & VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT) ? &exportSemaphoreWin32HandleInfoKHR : NULL;
+#else
+        exportSemaphoreCreateInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
+        semaphoreInfo.pNext = &exportSemaphoreCreateInfo;
+        VK_CHECK_RESULT(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &vulkanRenderingDone))
+
         // give access to cuda
         initCudaResources(memAlloc.allocationSize);
 
@@ -1244,22 +1332,15 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
         vks::initializers::commandBufferAllocateInfo(commandPool, VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1);
     VK_CHECK_RESULT(vkAllocateCommandBuffers(device, &cmdBufAllocateInfo, &commandBuffer));
 
-    float mvpMatrix[16];
-    memset(&mvpMatrix, 0, sizeof(mvpMatrix));
-    mvpMatrix[0] = 1;
-    mvpMatrix[5] = 1;
-    mvpMatrix[10] = 1;
-    mvpMatrix[15] = 1;
-    render(mvpMatrix);
-
+    prepareRenderStructs();
     vkQueueWaitIdle(queue);
 }
 
 VulkanHeadless::~VulkanHeadless()
 {
-    std::cout << "destroying VulkanHeadless" << std::endl;
     destroyCudaResources();
 
+    vkDestroySemaphore(device, vulkanRenderingDone, nullptr);
     vkDestroyBuffer(device, vertexBuffer, nullptr);
     vkFreeMemory(device, vertexMemory, nullptr);
     vkDestroyBuffer(device, indexBuffer, nullptr);

@@ -9,7 +9,10 @@ class VulkanHeadless
 private:
     cudaMipmappedArray_t cudaMipmap;
     cudaArray_t cudaArray;
+
+    VkSemaphore vulkanRenderingDone;
     cudaExternalMemory_t cudaExtMemory;
+    cudaExternalSemaphore_t cudaExtSemaphore;
 
     uint32_t indexCount;
 
@@ -21,6 +24,16 @@ private:
 
     /* Submit command buffer to a queue and wait for fence until queue operations have been finished */
     void submitWork(VkCommandBuffer cmdBuffer, VkQueue queue);
+
+    VkCommandBufferBeginInfo renderCmdBufBeginInfo;
+    VkClearValue renderClearValues[2];
+    VkRenderPassBeginInfo renderPassBeginInfo = {};
+    VkViewport viewport = {};
+    VkRect2D scissor = {};
+    VkDeviceSize vertexBufferOffsets[1] = { 0 };
+    VkSubmitInfo submitInfo{};
+    cudaExternalSemaphoreWaitParams waitParams = {};
+    void prepareRenderStructs();
 
 public:
     VkInstance instance;
@@ -62,5 +75,5 @@ public:
     VulkanHeadless(const int32_t width, const int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE] = NULL);
     ~VulkanHeadless();
 
-    void render(float *mvpMatrix);
+    void render(float *mvpMatrix, cudaStream_t stream);
 };

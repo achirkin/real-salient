@@ -557,7 +557,7 @@ try
             fps = 1 / frame_avg_time;
         frame_start_time = frame_stop_time;
 
-        vulkanHeadless.render(mvpMatrix);
+        vulkanHeadless.render(mvpMatrix, mainStream);
         frameset data = pipe.wait_for_frames();
 
         // copy the color frame, so that getFeature gets the actual color data.
