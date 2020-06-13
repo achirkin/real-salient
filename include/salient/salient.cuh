@@ -543,7 +543,8 @@ namespace salient
         else
         {
             out_depth[i + j * W] = -tex2D<float>(depthInterpTex, dx, dy);
-            out_labels[i + j * W] = inBounds ? -1 : 1;
+            label_base = out_labels[i + j * W]; // if in previous frame the pixel label was known for sure, impute it.
+            out_labels[i + j * W] = inBounds ? (label_base >= 0 ? (label_base - 0x80) : -1) : 1;
         }
     }
 
