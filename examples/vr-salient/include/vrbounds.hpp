@@ -2,19 +2,17 @@
 #include <openvr.h>
 #include "salient/salient.cuh"
 
-
-template<class Vertex>
+template <class Vertex>
 class VrBounds
 {
 public:
     int validDevCount;
 
 private:
-
     const salient::CameraIntrinsics colorIntr;
     const salient::CameraExtrinsics color2tracker;
     salient::CameraExtrinsics world2color;
-    vr::IVRSystem* m_pHMD;
+    vr::IVRSystem *m_pHMD;
     vr::TrackedDevicePose_t devicePositions[vr::k_unMaxTrackedDeviceCount];
 
     float (*trackerPos)[4];
@@ -29,14 +27,19 @@ private:
     salient::SceneBounds boundPoints()
     {
         if (validDevCount <= 0)
-            return salient::SceneBounds
-        { 0 // left;
-        , 0 // top;
-        , colorIntr.width // right;
-        , colorIntr.height // bottom;
-        , near // near;
-        , far // far;
-        };
+            return salient::SceneBounds{
+                0 // left;
+                ,
+                0 // top;
+                ,
+                colorIntr.width // right;
+                ,
+                colorIntr.height // bottom;
+                ,
+                near // near;
+                ,
+                far // far;
+            };
         float marginTop = 0.2f;
         float marginSide = 0.5f;
         float marginBottom = 2.0f; // don't remove legs!
@@ -65,20 +68,28 @@ private:
     };
 
 public:
-
-	float mvpMatrix[16];
+    float mvpMatrix[16];
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
     salient::SceneBounds trackerBounds;
+    bool trackerFound = false;
+    bool shaperoneValid = false;
 
-	VrBounds(Vertex (*toVertex)(float, float, float), const salient::CameraExtrinsics color2tracker, const salient::CameraIntrinsics colorIntr, const float near = 0.1f, const float far = 10.0f)
-        :color2tracker(color2tracker), colorIntr(colorIntr), near(near), far(far)
-	{
+    VrBounds(Vertex (*toVertex)(float, float, float), const salient::CameraExtrinsics color2tracker, const salient::CameraIntrinsics colorIntr, const float near = 0.1f, const float far = 10.0f)
+        : color2tracker(color2tracker), colorIntr(colorIntr), near(near), far(far)
+    {
         int trackerIdx = -1;
         deviceCount = 0;
         trackedDevCount = 0;
         validDevCount = 0;
         trackerBounds = boundPoints();
+        memset(&mvpMatrix, 0, sizeof(mvpMatrix));
+        memset(&pMatrix, 0, sizeof(pMatrix));
+        pMatrix[0] = 2 * colorIntr.fx / colorIntr.width;
+        pMatrix[5] = 2 * colorIntr.fy / colorIntr.height;
+        pMatrix[10] = (far + near) / (far - near);
+        pMatrix[11] = 1;
+        pMatrix[14] = 2 * far * near / (near - far);
 
         // Loading the SteamVR Runtime
         vr::EVRInitError eError = vr::VRInitError_None;
@@ -128,79 +139,81 @@ public:
                 std::cout << std::endl;
             }
         }
+        if (trackerIdx < 0)
+        {
+            std::cout << "Could not find the camera tracker (searched for a generic tracker class)" << std::endl;
+            return;
+        }
+        trackerFound = true;
         trackerPos = devicePositions[trackerIdx].mDeviceToAbsoluteTracking.m;
         std::cout << "Found " << trackedDevCount << " devices to track." << std::endl;
 
         auto vrsetup = vr::VRChaperoneSetup();
         uint32_t chaperoneQuadsCount;
         vrsetup->GetLiveCollisionBoundsInfo(NULL, &chaperoneQuadsCount);
-        vr::HmdQuad_t* chaperoneBounds = new vr::HmdQuad_t[chaperoneQuadsCount];
-        vrsetup->GetLiveCollisionBoundsInfo(chaperoneBounds, &chaperoneQuadsCount);
-
-
-        float smins[3], smaxs[3];
-        for (int k = 0; k < 3; k++)
+        if (chaperoneQuadsCount > 0)
         {
-            smins[k] = std::numeric_limits<float>::infinity();
-            smaxs[k] = -smins[k];
+            shaperoneValid = true;
+            vr::HmdQuad_t *chaperoneBounds = new vr::HmdQuad_t[chaperoneQuadsCount];
+            vrsetup->GetLiveCollisionBoundsInfo(chaperoneBounds, &chaperoneQuadsCount);
+
+            float smins[3], smaxs[3];
+            for (int k = 0; k < 3; k++)
+            {
+                smins[k] = std::numeric_limits<float>::infinity();
+                smaxs[k] = -smins[k];
+            }
+            for (int i = 0; i < chaperoneQuadsCount; i++)
+            {
+                for (int j = 0; j < 4; j++)
+                    for (int k = 0; k < 3; k++)
+                    {
+                        smins[k] = min(smins[k], chaperoneBounds[i].vCorners[j].v[k]);
+                        smaxs[k] = max(smaxs[k], chaperoneBounds[i].vCorners[j].v[k]);
+                    }
+                vertices.push_back(toVertex(chaperoneBounds[i].vCorners[0].v[0], chaperoneBounds[i].vCorners[0].v[1], chaperoneBounds[i].vCorners[0].v[2]));
+                vertices.push_back(toVertex(chaperoneBounds[i].vCorners[1].v[0], chaperoneBounds[i].vCorners[1].v[1], chaperoneBounds[i].vCorners[1].v[2]));
+                vertices.push_back(toVertex(chaperoneBounds[i].vCorners[2].v[0], chaperoneBounds[i].vCorners[2].v[1], chaperoneBounds[i].vCorners[2].v[2]));
+                vertices.push_back(toVertex(chaperoneBounds[i].vCorners[3].v[0], chaperoneBounds[i].vCorners[3].v[1], chaperoneBounds[i].vCorners[3].v[2]));
+                indices.push_back(i * 4);
+                indices.push_back(i * 4 + 2);
+                indices.push_back(i * 4 + 1);
+                indices.push_back(i * 4 + 3);
+                indices.push_back(i * 4 + 2);
+                indices.push_back(i * 4);
+            }
+            vertices.push_back(toVertex(smins[0], smins[1], smins[2]));
+            vertices.push_back(toVertex(smins[0], smins[1], smaxs[2]));
+            vertices.push_back(toVertex(smaxs[0], smins[1], smaxs[2]));
+            vertices.push_back(toVertex(smaxs[0], smins[1], smins[2]));
+            vertices.push_back(toVertex(smins[0], smaxs[1], smins[2]));
+            vertices.push_back(toVertex(smins[0], smaxs[1], smaxs[2]));
+            vertices.push_back(toVertex(smaxs[0], smaxs[1], smaxs[2]));
+            vertices.push_back(toVertex(smaxs[0], smaxs[1], smins[2]));
+            indices.push_back(chaperoneQuadsCount * 4);
+            indices.push_back(chaperoneQuadsCount * 4 + 2);
+            indices.push_back(chaperoneQuadsCount * 4 + 1);
+            indices.push_back(chaperoneQuadsCount * 4 + 3);
+            indices.push_back(chaperoneQuadsCount * 4 + 2);
+            indices.push_back(chaperoneQuadsCount * 4);
+            indices.push_back(chaperoneQuadsCount * 4 + 4);
+            indices.push_back(chaperoneQuadsCount * 4 + 5);
+            indices.push_back(chaperoneQuadsCount * 4 + 6);
+            indices.push_back(chaperoneQuadsCount * 4 + 7);
+            indices.push_back(chaperoneQuadsCount * 4 + 4);
+            indices.push_back(chaperoneQuadsCount * 4 + 6);
+            delete[] chaperoneBounds;
         }
-        for (int i = 0; i < chaperoneQuadsCount; i++)
-        {
-            for (int j = 0; j < 4; j++)
-                for (int k = 0; k < 3; k++)
-                {
-                    smins[k] = min(smins[k], chaperoneBounds[i].vCorners[j].v[k]);
-                    smaxs[k] = max(smaxs[k], chaperoneBounds[i].vCorners[j].v[k]);
-                }
-            vertices.push_back(toVertex(chaperoneBounds[i].vCorners[0].v[0], chaperoneBounds[i].vCorners[0].v[1], chaperoneBounds[i].vCorners[0].v[2]));
-            vertices.push_back(toVertex(chaperoneBounds[i].vCorners[1].v[0], chaperoneBounds[i].vCorners[1].v[1], chaperoneBounds[i].vCorners[1].v[2]));
-            vertices.push_back(toVertex(chaperoneBounds[i].vCorners[2].v[0], chaperoneBounds[i].vCorners[2].v[1], chaperoneBounds[i].vCorners[2].v[2]));
-            vertices.push_back(toVertex(chaperoneBounds[i].vCorners[3].v[0], chaperoneBounds[i].vCorners[3].v[1], chaperoneBounds[i].vCorners[3].v[2]));
-            indices.push_back(i * 4);
-            indices.push_back(i * 4 + 2);
-            indices.push_back(i * 4 + 1);
-            indices.push_back(i * 4 + 3);
-            indices.push_back(i * 4 + 2);
-            indices.push_back(i * 4);
-        }
-        vertices.push_back(toVertex(smins[0], smins[1], smins[2]));
-        vertices.push_back(toVertex(smins[0], smins[1], smaxs[2]));
-        vertices.push_back(toVertex(smaxs[0], smins[1], smaxs[2]));
-        vertices.push_back(toVertex(smaxs[0], smins[1], smins[2]));
-        vertices.push_back(toVertex(smins[0], smaxs[1], smins[2]));
-        vertices.push_back(toVertex(smins[0], smaxs[1], smaxs[2]));
-        vertices.push_back(toVertex(smaxs[0], smaxs[1], smaxs[2]));
-        vertices.push_back(toVertex(smaxs[0], smaxs[1], smins[2]));
-        indices.push_back(chaperoneQuadsCount * 4);
-        indices.push_back(chaperoneQuadsCount * 4 + 2);
-        indices.push_back(chaperoneQuadsCount * 4 + 1);
-        indices.push_back(chaperoneQuadsCount * 4 + 3);
-        indices.push_back(chaperoneQuadsCount * 4 + 2);
-        indices.push_back(chaperoneQuadsCount * 4);
-        indices.push_back(chaperoneQuadsCount * 4 + 4);
-        indices.push_back(chaperoneQuadsCount * 4 + 5);
-        indices.push_back(chaperoneQuadsCount * 4 + 6);
-        indices.push_back(chaperoneQuadsCount * 4 + 7);
-        indices.push_back(chaperoneQuadsCount * 4 + 4);
-        indices.push_back(chaperoneQuadsCount * 4 + 6);
-        delete[] chaperoneBounds;
+    };
 
-        memset(&mvpMatrix, 0, sizeof(mvpMatrix));
-        memset(&pMatrix, 0, sizeof(pMatrix));
-        pMatrix[0] = 2 * colorIntr.fx / colorIntr.width;
-        pMatrix[5] = 2 * colorIntr.fy / colorIntr.height;
-        pMatrix[10] = (far + near) / (far - near);
-        pMatrix[11] = 1;
-        pMatrix[14] = 2 * far * near / (near - far);
-	};
+    ~VrBounds()
+    {
+        if (m_pHMD != nullptr)
+            vr::VR_Shutdown();
+    };
 
-	~VrBounds()
-	{
-
-	};
-
-	void update()
-	{
+    void update()
+    {
         if (deviceCount <= 0)
             return;
 
@@ -257,11 +270,11 @@ public:
         }
         mvpMatrix[14] += pMatrix[14];
         mvpMatrix[15] = world2color.translation[2];
-	};
+    };
 
-    template<class ToResult>
-    auto getTrackedPoint(ToResult f, int i) -> decltype(f(0, 0)) {
+    template <class ToResult>
+    auto getTrackedPoint(ToResult f, int i) -> decltype(f(0, 0))
+    {
         return f(trackedDevXYs[i * 2], trackedDevXYs[i * 2 + 1]);
     }
-
 };

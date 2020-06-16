@@ -30,12 +30,10 @@ private:
     VkRenderPassBeginInfo renderPassBeginInfo = {};
     VkViewport viewport = {};
     VkRect2D scissor = {};
-    VkDeviceSize vertexBufferOffsets[1] = { 0 };
+    VkDeviceSize vertexBufferOffsets[1] = {0};
     VkSubmitInfo submitInfo{};
     cudaExternalSemaphoreWaitParams waitParams = {};
-    void prepareRenderStructs();
 
-public:
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
     VkDevice device;
@@ -60,20 +58,31 @@ public:
         VkImageView view;
     };
 
-    struct Vertex
-    {
-        float position[3];
-    };
-
-    const int32_t width, height;
     VkFramebuffer framebuffer;
     FrameBufferAttachment colorAttachment, depthAttachment;
     VkRenderPass renderPass;
 
     VkDebugReportCallbackEXT debugReportCallback{};
 
+    void prepareRenderStructs();
+
+public:
+    bool isValid;
+
+    struct Vertex
+    {
+        float position[3];
+    };
+
+    const int32_t width, height;
+
     VulkanHeadless(const int32_t width, const int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE] = NULL);
     ~VulkanHeadless();
 
     void render(float *mvpMatrix, cudaStream_t stream);
+
+    inline cudaTextureObject_t *getCudaTexture()
+    {
+        return isValid ? &cudaTexture : nullptr;
+    }
 };

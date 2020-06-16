@@ -13,12 +13,32 @@
 #include "vrbounds.hpp"
 #include "vulkanheadless.hpp"
 
-__global__ void draw_foreground(int downsample_ratio, int W, int H, uint8_t* out_rgb, const float* probabilities, const uint8_t* in_color, cudaTextureObject_t in_extra)
+__global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color)
 {
-    //int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    //if (idx >= N)
-    //    return;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N)
+        return;
 
+    if (probabilities[idx] > 0.5f)
+    {
+        float Y = ((float)in_color[idx * 2]) - 16.0f;
+        float Cb = ((float)in_color[(idx - idx % 2) * 2 + 1]) - 128.0f;
+        float Cr = ((float)in_color[(idx - idx % 2) * 2 + 3]) - 128.0f;
+
+        out_rgb[idx * 3 + 0] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y + 2.017999649f * Cb)));
+        out_rgb[idx * 3 + 1] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y - 0.812999725f * Cr - 0.390999794f * Cb)));
+        out_rgb[idx * 3 + 2] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y + 1.595999718f * Cr)));
+    }
+    else
+    {
+        out_rgb[idx * 3 + 0] = 0;
+        out_rgb[idx * 3 + 1] = 150;
+        out_rgb[idx * 3 + 2] = 0;
+    }
+}
+
+__global__ void draw_foreground(int downsample_ratio, int W, int H, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color, cudaTextureObject_t in_extra)
+{
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= W || j >= H)
@@ -103,11 +123,11 @@ try
 {
     int devCount;
     cudaGetDeviceCount(&devCount);
-    
+
     // Select the GPU.
     // The idea is to select a secondary, less powerfull GPU for this, so that it does not interfere with
     // the main user activity (such as playing VR).
-    int devId = devCount > 1 ?  1 : 0;
+    int devId = devCount > 1 ? 1 : 0;
     cudaSetDevice(devId);
 
     cudaStream_t mainStream;
@@ -122,7 +142,6 @@ try
     using namespace cv;
     using namespace rs2;
 
-
     // I screw the camera in on top of the vive controller, thus fixing one of the axes solid.
     // The two remaining axes are defined by one angle - the position where the camera is screwed in tight.
     // I determine this angle by (1) guessing the approximate value (2) tuning it by drawing controller and camera positions on screen.
@@ -133,8 +152,6 @@ try
          0, 0, -1,
          -sph, cph, 0},
         {0, 0, 0.02f}};
-
-
 
     // find the camera
     pipeline pipe;
@@ -188,7 +205,7 @@ try
         rs2_color_intr.fx,
         rs2_color_intr.fy};
 
-    auto toVertex = [](float x, float y, float z) { return VulkanHeadless::Vertex{ { x, y, z } }; };
+    auto toVertex = [](float x, float y, float z) { return VulkanHeadless::Vertex{{x, y, z}}; };
     VrBounds<VulkanHeadless::Vertex> vrBounds(toVertex, color2tracker, colorIntr);
 
     // rely on the fact that we have the same representation as librealsense
@@ -214,6 +231,16 @@ try
     salient::RealSalient<3, 7, decltype(getFeature)> realSalient(
         mainStream, depthIntr, colorIntr, color2depth, downsample_ratio, sensor.get_depth_scale(), getFeature);
 
+    // This initial bound is used to find the salient object when no VR tracking is available.
+    salient::SceneBounds foregroundBounds{
+        (int)round(0.1f * color_W) /* int left in pixels */,
+        (int)round(0.1f * color_H) /* int top in pixels */,
+        (int)round(0.9f * color_W) /* int right in pixels */,
+        color_H /* int bottom in pixels */,
+        0.4f /* float near distance meters */,
+        2.0f /* float far distance meters */
+    };
+
     // vulkan-to-cuda rendering
     auto vulkanHeadless = VulkanHeadless(W, H, vrBounds.vertices, vrBounds.indices, deviceUUID);
 
@@ -234,7 +261,6 @@ try
 
     Mat3b foreground;
     foreground.create(Size(color_W, color_H));
-
 
     // Control all analysis parameters via trackbars
     int gmmIterations = 10; // realSalient.analysisSettings.gmmIterations;
@@ -285,7 +311,6 @@ try
             fps = 1 / frame_avg_time;
         frame_start_time = frame_stop_time;
 
-
         vulkanHeadless.render(vrBounds.mvpMatrix, mainStream);
         frameset data = pipe.wait_for_frames();
 
@@ -296,13 +321,18 @@ try
         // load frames to gpu and preprocess
         realSalient.processFrames(
             (const uint16_t *)data.get_depth_frame().get_data(),
-            vrBounds.trackerBounds,
-            &(vulkanHeadless.cudaTexture));
+            vrBounds.validDevCount > 0 ? vrBounds.trackerBounds : foregroundBounds,
+            vulkanHeadless.getCudaTexture());
 
-        // draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
-        dim3 bs(32, 32, 1);
-        draw_foreground<<<salient::distribute(dim3(color_W, color_H, 1), bs), bs, 0, mainStream>>>(downsample_ratio, color_W, color_H, rgbGPU, realSalient.probabilities, yuyvGPU, vulkanHeadless.cudaTexture);
-        
+        if (vulkanHeadless.isValid)
+        {
+            dim3 bs(32, 32, 1);
+            draw_foreground<<<salient::distribute(dim3(color_W, color_H, 1), bs), bs, 0, mainStream>>>(downsample_ratio, color_W, color_H, rgbGPU, realSalient.probabilities, yuyvGPU, *vulkanHeadless.getCudaTexture());
+        }
+        else
+        {
+            draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
+        }
 
         cudaErrorCheck(mainStream);
 
@@ -317,14 +347,23 @@ try
 
         // show VR headset
         auto toPoint = [](int x, int y) { return cv::Point(x, y); };
-        cv::line(foreground, vrBounds.getTrackedPoint(toPoint, 0), vrBounds.getTrackedPoint(toPoint, 1), cv::Scalar(0, 0, 255), 2);
-        cv::line(foreground, vrBounds.getTrackedPoint(toPoint, 0), vrBounds.getTrackedPoint(toPoint, 2), cv::Scalar(0, 0, 255), 2);
+        if (vrBounds.validDevCount == 1)
+        {
+            cv::circle(foreground, vrBounds.getTrackedPoint(toPoint, 0), 3, cv::Scalar(0, 0, 255), 2);
+        }
+        else if (vrBounds.validDevCount > 1)
+        {
+            auto head = vrBounds.getTrackedPoint(toPoint, 0);
+            for (int k = vrBounds.validDevCount - 1; k > 0; k--)
+                cv::line(foreground, head, vrBounds.getTrackedPoint(toPoint, k), cv::Scalar(0, 0, 255), 2);
+        }
 
         imshow(window_name, foreground);
 
         // update bounds given our refined labeling, assuming they don't change too much.
         // NB: in reality, it's much better to infer these bounds from the VR tracker positions.
-        // foregroundBounds = realSalient.postprocessInferBounds();
+        if (vrBounds.validDevCount <= 0) // if cannot track through VR.
+            foregroundBounds = realSalient.postprocessInferBounds();
     }
 
     cudaStreamDestroy(mainStream);

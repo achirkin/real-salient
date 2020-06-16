@@ -154,7 +154,7 @@ namespace salient
         void loadColorFrame();
 
         /** Use the earlier initialized depth data to initialize labels. */
-        void buildLabels(const SceneBounds foreground_bounds, const cudaTextureObject_t* renderedDepth = nullptr);
+        void buildLabels(const SceneBounds foreground_bounds, const cudaTextureObject_t *renderedDepth = nullptr);
 
         /** Run all models on the current frame. */
         void runModels();
@@ -292,7 +292,7 @@ namespace salient
         void processFrames(
             const uint16_t *host_depth_buffer,
             const SceneBounds foreground_bounds,
-            const cudaTextureObject_t * renderedDepth = nullptr);
+            const cudaTextureObject_t *renderedDepth = nullptr);
 
         /**
          * Try to infer bounds on the salient object (foreground).
@@ -618,11 +618,13 @@ namespace salient
     }
 
     template <int C, int GaussianK, class GetFeature>
-    void RealSalient<C, GaussianK, GetFeature>::buildLabels(const SceneBounds foreground_bounds, const cudaTextureObject_t* renderedDepth)
+    void RealSalient<C, GaussianK, GetFeature>::buildLabels(const SceneBounds foreground_bounds, const cudaTextureObject_t *renderedDepth)
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
-        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(), aligned_depth, depthScale, foreground_bounds, color2depth,
-            *renderedDepth, renderedDepth != nullptr);
+        depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(
+            W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(), aligned_depth, depthScale, foreground_bounds, color2depth,
+            renderedDepth != nullptr ? (*renderedDepth) : 0,
+            renderedDepth != nullptr);
         cudaErrorCheck(mainStream);
         labels_impute<X><<<distribute(dimWork, enlargeSquare(squareBlockSize, X)), squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
         cudaErrorCheck(mainStream);

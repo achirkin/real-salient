@@ -752,13 +752,12 @@ void VulkanHeadless::submitWork(VkCommandBuffer cmdBuffer, VkQueue queue)
     vkDestroyFence(device, fence, nullptr);
 }
 
-
 void VulkanHeadless::prepareRenderStructs()
 {
     renderCmdBufBeginInfo = vks::initializers::commandBufferBeginInfo();
 
-    renderClearValues[0].color = { {100.0f, 0.0f, 0.0f, 0.0f} };
-    renderClearValues[1].depthStencil = { 1.0f, 0 };
+    renderClearValues[0].color = {{100.0f, 0.0f, 0.0f, 0.0f}};
+    renderClearValues[1].depthStencil = {1.0f, 0};
 
     renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassBeginInfo.renderArea.extent.width = width;
@@ -786,9 +785,10 @@ void VulkanHeadless::prepareRenderStructs()
     waitParams.params.fence.value = 0;
 }
 
-
 void VulkanHeadless::render(float *mvpMatrix, cudaStream_t stream)
 {
+    if (!isValid)
+        return;
     VK_CHECK_RESULT(vkBeginCommandBuffer(commandBuffer, &renderCmdBufBeginInfo));
     vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -808,9 +808,10 @@ void VulkanHeadless::render(float *mvpMatrix, cudaStream_t stream)
 }
 
 VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex> vertices, std::vector<uint32_t> indices, uint8_t requestedUUID[VK_UUID_SIZE])
-    : width(width), height(height)
+    : width(width), height(height), isValid(indices.size() >= 3 && width > 0 && height > 0)
 {
-    LOG("Running headless rendering example\n");
+    if (!isValid)
+        return;
 
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -1338,6 +1339,9 @@ VulkanHeadless::VulkanHeadless(int32_t width, int32_t height, std::vector<Vertex
 
 VulkanHeadless::~VulkanHeadless()
 {
+    if (!isValid)
+        return;
+
     destroyCudaResources();
 
     vkDestroySemaphore(device, vulkanRenderingDone, nullptr);
