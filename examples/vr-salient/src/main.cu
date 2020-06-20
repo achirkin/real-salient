@@ -9,56 +9,32 @@
 #include "vulkanheadless.hpp"
 #include "cameraD415.hpp"
 
-__global__ void draw_foreground(int N, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color)
+__global__ void draw_foreground(int N, uint8_t *out_bgr, const float *probabilities, const uint8_t *in_color)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N)
         return;
+    // make foreground semi-transparent if the probability is between 0.45 and 0.55:
+    const float a = max(0.0f, min(1.0f, probabilities[idx] * 10.0f - 4.5f));
+    // choose a background color:
+    const float b0 = (1.0f - a) * 0.0f;
+    const float g0 = (1.0f - a) * 150.0f;
+    const float r0 = (1.0f - a) * 0.0f;
 
-    if (probabilities[idx] > 0.5f)
-    {
-        float Y = ((float)in_color[idx * 2]) - 16.0f;
-        float Cb = ((float)in_color[(idx - idx % 2) * 2 + 1]) - 128.0f;
-        float Cr = ((float)in_color[(idx - idx % 2) * 2 + 3]) - 128.0f;
+    // input is in YUYV
+    float Y = ((float)in_color[idx * 2]) - 16.0f;
+    float Cb = ((float)in_color[(idx - idx % 2) * 2 + 1]) - 128.0f;
+    float Cr = ((float)in_color[(idx - idx % 2) * 2 + 3]) - 128.0f;
 
-        out_rgb[idx * 3 + 0] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y + 2.017999649f * Cb)));
-        out_rgb[idx * 3 + 1] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y - 0.812999725f * Cr - 0.390999794f * Cb)));
-        out_rgb[idx * 3 + 2] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y + 1.595999718f * Cr)));
-    }
-    else
-    {
-        out_rgb[idx * 3 + 0] = 0;
-        out_rgb[idx * 3 + 1] = 150;
-        out_rgb[idx * 3 + 2] = 0;
-    }
-}
+    // ...transformed to BGR (as OpenCV desires)
+    float b = max(0.0f, min(255.0f, 1.163999557f * Y + 2.017999649f * Cb));
+    float g = max(0.0f, min(255.0f, 1.163999557f * Y - 0.812999725f * Cr - 0.390999794f * Cb));
+    float r = max(0.0f, min(255.0f, 1.163999557f * Y + 1.595999718f * Cr));
 
-__global__ void draw_foreground(int downsample_ratio, int W, int H, uint8_t *out_rgb, const float *probabilities, const uint8_t *in_color, cudaTextureObject_t in_extra)
-{
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
-    if (i >= W || j >= H)
-        return;
-
-    int idx = i + j * W;
-
-    if (probabilities[idx] > 0.5f)
-    {
-        float Y = ((float)in_color[idx * 2]) - 16.0f;
-        float Cb = ((float)in_color[(idx - idx % 2) * 2 + 1]) - 128.0f;
-        float Cr = ((float)in_color[(idx - idx % 2) * 2 + 3]) - 128.0f;
-
-        out_rgb[idx * 3 + 0] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y + 2.017999649f * Cb)));
-        out_rgb[idx * 3 + 1] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y - 0.812999725f * Cr - 0.390999794f * Cb)));
-        out_rgb[idx * 3 + 2] = (uint8_t)__float2int_rd(max(0.0f, min(255.0f, 1.163999557f * Y + 1.595999718f * Cr)));
-    }
-    else
-    {
-        uint8_t extra = (uint8_t)max(0.0f, min(255.0f, 255.0f - tex2D<float>(in_extra, (float)i / (float)downsample_ratio, (float)j / (float)downsample_ratio) * 100.0f));
-        out_rgb[idx * 3 + 0] = extra;
-        out_rgb[idx * 3 + 1] = extra;
-        out_rgb[idx * 3 + 2] = extra;
-    }
+    // combine with background
+    out_bgr[idx * 3 + 0] = (uint8_t)__float2int_rd(b * a + b0);
+    out_bgr[idx * 3 + 1] = (uint8_t)__float2int_rd(g * a + g0);
+    out_bgr[idx * 3 + 2] = (uint8_t)__float2int_rd(r * a + r0);
 }
 
 int main(int argc, char *argv[])
@@ -116,8 +92,8 @@ int main(int argc, char *argv[])
     cudaErrorCheck(nullptr);
 
     // transformed RGB image with foreground mask applied
-    uint8_t *rgbGPU = nullptr;
-    cudaMalloc((void **)&rgbGPU, sizeof(uint8_t) * color_W * color_H * 3);
+    uint8_t *bgrGPU = nullptr;
+    cudaMalloc((void **)&bgrGPU, sizeof(uint8_t) * color_W * color_H * 3);
     cudaErrorCheck(nullptr);
 
     // how to access color data at every pixel position.
@@ -231,19 +207,11 @@ int main(int argc, char *argv[])
             vrBounds.validDevCount > 0 ? vrBounds.trackerBounds : foregroundBounds,
             vulkanHeadless.getCudaTexture());
 
-        if (vulkanHeadless.isValid)
-        {
-            dim3 bs(32, 32, 1);
-            draw_foreground<<<salient::distribute(dim3(color_W, color_H, 1), bs), bs, 0, mainStream>>>(downsample_ratio, color_W, color_H, rgbGPU, realSalient.probabilities, yuyvGPU, *vulkanHeadless.getCudaTexture());
-        }
-        else
-        {
-            draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, rgbGPU, realSalient.probabilities, yuyvGPU);
-        }
+        draw_foreground<<<salient::distribute(color_N, BLOCK_SIZE), BLOCK_SIZE, 0, mainStream>>>(color_N, bgrGPU, realSalient.probabilities, yuyvGPU);
 
         cudaErrorCheck(mainStream);
 
-        cudaMemcpyAsync(foreground.data, rgbGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
+        cudaMemcpyAsync(foreground.data, bgrGPU, sizeof(uint8_t) * color_W * color_H * 3, cudaMemcpyDeviceToHost, mainStream);
         cudaErrorCheck(mainStream);
 
         // before using the results coming from GPU, we need to wait the GPU stream to finish.
@@ -275,7 +243,7 @@ int main(int argc, char *argv[])
 
     cudaStreamDestroy(mainStream);
     cudaErrorCheck(nullptr);
-    cudaFree(rgbGPU);
+    cudaFree(bgrGPU);
     cudaErrorCheck(nullptr);
     cudaFree(yuyvGPU);
     cudaErrorCheck(nullptr);
