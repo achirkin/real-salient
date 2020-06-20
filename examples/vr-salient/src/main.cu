@@ -162,14 +162,17 @@ int main(int argc, char *argv[])
     cv::Mat3b foreground;
     foreground.create(cv::Size(color_W, color_H));
 
+#ifdef SLIDERS
     // Control all analysis parameters via trackbars
-    int gmmIterations = 10; // realSalient.analysisSettings.gmmIterations;
-    cv::createTrackbar("GMM iterations", window_name, &gmmIterations, 100);
     int timeAlpha = (int)round(realSalient.analysisSettings.timeAlpha * 100);
-    cv::createTrackbar("GMM EMA α (x100)", window_name, &timeAlpha, 100);
+    cv::createTrackbar("Frame α (x100)", window_name, &timeAlpha, 100);
+    int gmmIterations = realSalient.analysisSettings.gmmIterations;
+    cv::createTrackbar("GMM iterations", window_name, &gmmIterations, 100);
+    int gmmAlpha = (int)round(realSalient.analysisSettings.gmmAlpha * 100);
+    cv::createTrackbar("GMM EMA α (x100)", window_name, &gmmAlpha, 100);
     int imputedLabelWeight = (int)round(realSalient.analysisSettings.imputedLabelWeight * 100);
     cv::createTrackbar("Imputed label weight (x100)", window_name, &imputedLabelWeight, 100);
-    int crfIterations = 3; // realSalient.analysisSettings.crfIterations;
+    int crfIterations = realSalient.analysisSettings.crfIterations;
     cv::createTrackbar("CRF iterations", window_name, &crfIterations, 20);
     int smoothnessWeight = (int)round(realSalient.analysisSettings.smoothnessWeight * 10);
     cv::createTrackbar("CRF smoothness weight (x10)", window_name, &smoothnessWeight, 200);
@@ -185,15 +188,18 @@ int main(int argc, char *argv[])
     cv::createTrackbar("CRF similarity weight (x10)", window_name, &similarityWeight, 200);
     int similarityVarCol = (int)round(sqrt(realSalient.analysisSettings.similarityVarCol) * 10);
     cv::createTrackbar("CRF similarity σ (x10)", window_name, &similarityVarCol, 1000);
+#endif
 
     for (int frame_number = 0; cv::waitKey(1) < 0 && cv::getWindowProperty(window_name, cv::WND_PROP_AUTOSIZE) >= 0; frame_number++)
     {
         // update camera model-view-projection matrix and the color-image-space bounding box.
         vrBounds.update();
 
+#ifdef SLIDERS
         // update analysis parameters from the trackbar every frame (avoiding 100500 callbacks to createTrackbar fun)
-        realSalient.analysisSettings.gmmIterations = gmmIterations;
         realSalient.analysisSettings.timeAlpha = (float)timeAlpha * 0.01f;
+        realSalient.analysisSettings.gmmIterations = gmmIterations;
+        realSalient.analysisSettings.gmmAlpha = (float)gmmAlpha * 0.01f;
         realSalient.analysisSettings.imputedLabelWeight = (float)imputedLabelWeight * 0.01f;
         realSalient.analysisSettings.crfIterations = crfIterations;
         realSalient.analysisSettings.smoothnessWeight = (float)smoothnessWeight * 0.1f;
@@ -203,6 +209,7 @@ int main(int argc, char *argv[])
         realSalient.analysisSettings.appearanceVarCol = max(0.01f, (float)(appearanceVarCol * appearanceVarCol) * 0.01f);
         realSalient.analysisSettings.similarityWeight = (float)similarityWeight * 0.1f;
         realSalient.analysisSettings.similarityVarCol = max(0.01f, (float)(similarityVarCol * similarityVarCol) * 0.01f);
+#endif
 
         frame_stop_time = std::chrono::high_resolution_clock::now();
         auto frame_time = std::chrono::duration_cast<std::chrono::microseconds>(frame_stop_time - frame_start_time);

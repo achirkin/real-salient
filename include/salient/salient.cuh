@@ -5,18 +5,25 @@
 #include "gmm.cuh"
 #include "salient_structs.hpp"
 
+#define SALIENT_FOREGROUND 0
+#define SALIENT_BACKGROUND 1
+#define SALIENT_UNKNOWN (-1)
+#define SALIENT_CONTRADICTION (-2)
+
 namespace salient
 {
     /** Settings for the components of RealSalient. Can be changed every frame. */
     struct AnalysisSettings
     {
+        float timeAlpha = 0.6f;
+
         // GMM settings
         int gmmIterations = 10;
-        float timeAlpha = 0.1f;
+        float gmmAlpha = 0.1f;
         float imputedLabelWeight = 0.3f;
 
         // CRF settings
-        int crfIterations = 5;
+        int crfIterations = 3;
         float smoothnessWeight = 3.0f;
         float smoothnessVarPos = 4.0f;
         float appearanceWeight = 10.0f;
@@ -94,6 +101,9 @@ namespace salient
 
         /** The block size for pre- and post-processing CUDA kernels in this class. */
         const dim3 squareBlockSize = dim3(32, 32, 1);
+
+        /** Previous state of probabilities. */
+        float *probabilities_prev;
 
         cudaArray *depthArray, *depthInterpArray, *lhoodArray;
         cudaTextureObject_t depthTex, depthInterpTex, lhoodTex;
@@ -197,11 +207,13 @@ namespace salient
               depthArray(nullptr), depthInterpArray(nullptr), lhoodArray(nullptr),
               gmmModel(mainStream, W * H),
               crfModel(mainStream, W * H, gmmModel.logLikelihoodPtr()),
-              probabilities(nullptr), aligned_depth(nullptr),
+              probabilities(nullptr), probabilities_prev(nullptr), aligned_depth(nullptr),
               postProcess_temp(nullptr), postProcess_temp_cpu(nullptr),
               colorFx(colorIntrinsics.fx), colorFy(colorIntrinsics.fy)
         {
             cudaMalloc((void **)&probabilities, sizeof(float) * color_W * color_H);
+            cudaErrorCheck(nullptr);
+            cudaMalloc((void **)&probabilities_prev, sizeof(float) * color_W * color_H);
             cudaErrorCheck(nullptr);
             cudaMalloc((void **)&postProcess_temp, sizeof(uint32_t) * (W + H + depthHistSize));
             cudaErrorCheck(nullptr);
@@ -224,6 +236,8 @@ namespace salient
             cudaFree(postProcess_temp);
             cudaErrorCheck(nullptr);
             cudaFree(probabilities);
+            cudaErrorCheck(nullptr);
+            cudaFree(probabilities_prev);
             cudaErrorCheck(nullptr);
             cudaDestroyTextureObject(depthInterpTex);
             cudaErrorCheck(nullptr);
@@ -465,6 +479,7 @@ namespace salient
         cudaTextureObject_t depthInterpTex,
         int8_t *out_labels,
         float *out_depth,
+        float *in_probs_prev,
         const float depthScale,
         const SceneBounds foreground_bounds,
         const salient::FrameTransform color2depth,
@@ -494,29 +509,43 @@ namespace salient
         if (depth > 0.01f)
             color2depth.transform(di, dj, depth, dx, dy);
         depth = tex2D<uint16_t>(depthTex, dx, dy) * depthScale;
+        int ix = i + j * W;
         int8_t label_base;
+        float foreground_prob_prev = 0;
+        for (int ki = 0; ki < downsampleRatio; ki++)
+            for (int kj = 0; kj < downsampleRatio; kj++)
+                foreground_prob_prev += in_probs_prev[i * downsampleRatio + ki + (j * downsampleRatio + kj) * downsampleRatio * W];
+        foreground_prob_prev /= (downsampleRatio * downsampleRatio);
+
         if (depth > 0)
         {
-            out_depth[i + j * W] = depth;
-            label_base = (!inBounds || depth > pfar || depth < foreground_bounds.near) ? 1 : 0;
+            out_depth[ix] = depth;
+            label_base = (!inBounds || depth > pfar || depth < foreground_bounds.near) ? SALIENT_BACKGROUND : SALIENT_FOREGROUND;
             if (abs(depth - pfar) < (depth + pfar) * 0.05f)
                 label_base -= 0x80; // make the label appear imputed if depth is too close to the threshold
-            out_labels[i + j * W] = label_base;
+            out_labels[ix] = label_base;
         }
         else
         {
-            out_depth[i + j * W] = -tex2D<float>(depthInterpTex, dx, dy);
-            label_base = out_labels[i + j * W]; // if in previous frame the pixel label was known for sure, impute it.
-            out_labels[i + j * W] = inBounds ? (label_base >= 0 ? (label_base - 0x80) : -1) : 1;
+            out_depth[ix] = -tex2D<float>(depthInterpTex, dx, dy);
+            if (!inBounds)
+                label_base = SALIENT_BACKGROUND;
+            else if (foreground_prob_prev > 0.8)
+                label_base = SALIENT_FOREGROUND - 0x80;
+            else if (foreground_prob_prev < 0.2)
+                label_base = SALIENT_BACKGROUND - 0x80;
+            else
+                label_base = SALIENT_UNKNOWN;
+            out_labels[ix] = label_base;
         }
     }
 
     __device__ int8_t match_labels(int8_t a, int8_t b)
     {
-        if (a == -1)
+        if (a == SALIENT_UNKNOWN)
             return b;
-        if (b != a && b != -1)
-            return -2;
+        if (b != a && b != SALIENT_UNKNOWN)
+            return SALIENT_CONTRADICTION;
         return a;
     }
 
@@ -527,7 +556,7 @@ namespace salient
         // -1 means not specified and can be any
         // -2 means contradiction
         // other value means all are either not specified or that class.
-        int8_t common_label = -1;
+        int8_t common_label = SALIENT_UNKNOWN;
         int8_t label_tmp;
         int w0 = (blockIdx.x * blockDim.x + threadIdx.x) << X;
         int h0 = (blockIdx.y * blockDim.y + threadIdx.y) << X;
@@ -538,7 +567,7 @@ namespace salient
             for (int h = h0; h < H && h < h0 + D; h++)
             {
                 label_tmp = labels[h * W + w];
-                label_tmp = (label_tmp == -1) ? label_tmp : (label_tmp & 0x7F); // use both GT and imputed data.
+                label_tmp = (label_tmp == SALIENT_UNKNOWN) ? label_tmp : (label_tmp & 0x7F); // use both GT and imputed data.
                 common_label = match_labels(common_label, label_tmp);
             }
         unsigned int t = blockDim.x;
@@ -567,7 +596,7 @@ namespace salient
             t = s;
             ix >>= 1;
             iy >>= 1;
-            if (common_label == -1)
+            if (common_label == SALIENT_UNKNOWN)
                 common_label = sdata[(s + iy) * s + ix];
         }
 
@@ -585,17 +614,34 @@ namespace salient
     {
         const unsigned int X(3); // gets to the power-of-two; the image scan block size multiplier
         depth_to_labels<<<distribute(dimWork, squareBlockSize), squareBlockSize, 0, mainStream>>>(
-            W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(), aligned_depth, depthScale, foreground_bounds, color2depth,
-            renderedDepth != nullptr ? (*renderedDepth) : 0,
-            renderedDepth != nullptr);
+            W, H, downsampleRatio, depthTex, depthInterpTex, gmmModel.labelsPtr(),
+            aligned_depth, probabilities, depthScale, foreground_bounds, color2depth,
+            renderedDepth != nullptr ? (*renderedDepth) : 0, renderedDepth != nullptr);
         cudaErrorCheck(mainStream);
         labels_impute<X><<<distribute(dimWork, enlargeSquare(squareBlockSize, X)), squareBlockSize, squareBlockSize.x * squareBlockSize.y * sizeof(int8_t) * 2, mainStream>>>(W, H, gmmModel.labelsPtr());
         cudaErrorCheck(mainStream);
     }
 
+    __global__ void reset_probabilities(
+        const int N, float *out_probs)
+    {
+        int index = blockIdx.x * blockDim.x + threadIdx.x;
+        if (index >= N)
+            return;
+        out_probs[index] = 0.5f;
+    }
+
     template <int C, int GaussianK, class GetFeature>
     void RealSalient<C, GaussianK, GetFeature>::initModels()
     {
+        int n = color_W * color_H;
+        int bs = 256;
+        int bc = distribute(n, bs);
+        reset_probabilities<<<bc, bs, 0, mainStream>>>(n, probabilities);
+        cudaErrorCheck(mainStream);
+        reset_probabilities<<<bc, bs, 0, mainStream>>>(n, probabilities_prev);
+        cudaErrorCheck(mainStream);
+
         // add a color independent term (feature = pixel location 0..W-1, 0..H-1)
         smoothnessPairwise = new crf::PairwisePotential<2, 2>(mainStream, W, H);
         crfModel.addPairwiseEnergy(smoothnessPairwise);
@@ -614,7 +660,7 @@ namespace salient
     {
         if (analysisSettings.gmmIterations > 0)
         {
-            gmmModel.alpha = analysisSettings.timeAlpha;
+            gmmModel.alpha = analysisSettings.gmmAlpha;
             gmmModel.imputed_weight = analysisSettings.imputedLabelWeight;
             gmmModel.iterate(analysisSettings.gmmIterations);
         }
@@ -643,23 +689,28 @@ namespace salient
     __global__ void compute_probabilities(
         const int probs_w, const int probs_h,
         const int lhood_w, const int lhood_h,
-        float *out_probs, cudaTextureObject_t lhoodTex)
+        const float alpha,
+        float *out_probs, float *prev_probs,
+        cudaTextureObject_t lhoodTex,
+        int8_t *labels)
     {
-        int indexX = blockIdx.x * blockDim.x + threadIdx.x;
-        int strideX = blockDim.x * gridDim.x;
-        int indexY = blockIdx.y * blockDim.y + threadIdx.y;
-        int strideY = blockDim.y * gridDim.y;
+        const int i = blockIdx.x * blockDim.x + threadIdx.x;
+        const int j = blockIdx.y * blockDim.y + threadIdx.y;
+        if (i >= probs_w || j >= probs_h)
+            return;
         float dx = (float)lhood_w / (float)probs_w;
         float dy = (float)lhood_h / (float)probs_h;
-        float2 lhood;
-        for (int i = indexX; i < probs_w; i += strideX)
-            for (int j = indexY; j < probs_h; j += strideY)
-            {
-                lhood = tex2D<float2>(lhoodTex, dx * i, dy * j);
-                lhood.x = expf(lhood.x);
-                lhood.y = expf(lhood.y);
-                out_probs[i + probs_w * j] = min(1.0f, max(0.0f, lhood.x / max(0.000001, lhood.x + lhood.y)));
-            }
+        int ix = i + probs_w * j;
+        int8_t label = labels[(int)(floorf(dx * i) + lhood_w * floorf(dy * j))];
+        if (label >= 0)
+            out_probs[ix] = label == SALIENT_FOREGROUND ? 1.0f : 0.0f;
+        else
+        {
+            float2 lhood = tex2D<float2>(lhoodTex, dx * i, dy * j);
+            lhood.x = expf(lhood.x);
+            lhood.y = expf(lhood.y);
+            out_probs[ix] = alpha * min(1.0f, max(0.0f, lhood.x / max(0.000001, lhood.x + lhood.y))) + (1.0f - alpha) * prev_probs[ix];
+        }
     }
 
     template <int C, int GaussianK, class GetFeature>
@@ -673,8 +724,11 @@ namespace salient
         auto lhoodPtr = analysisSettings.crfIterations > 0 ? crfModel.logLikelihoodPtr() : gmmModel.logLikelihoodPtr();
         cudaMemcpyToArrayAsync(lhoodArray, 0, 0, lhoodPtr, sizeof(float) * 2 * W * H, cudaMemcpyDeviceToDevice, mainStream);
         cudaErrorCheck(mainStream);
-        compute_probabilities<<<distribute(dimColor, squareBlockSize), squareBlockSize, 0, mainStream>>>(color_W, color_H, W, H, probabilities, lhoodTex);
+        compute_probabilities<<<distribute(dimColor, squareBlockSize), squareBlockSize, 0, mainStream>>>(
+            color_W, color_H, W, H, analysisSettings.timeAlpha, probabilities_prev, probabilities, lhoodTex, gmmModel.labelsPtr());
         cudaErrorCheck(mainStream);
+        // NB: without device-to-host synchronisation this function may return before the new probabilites are calculated.
+        std::swap(probabilities_prev, probabilities);
     }
 
     __global__ void postprocess_histograms(

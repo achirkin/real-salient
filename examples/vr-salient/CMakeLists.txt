@@ -18,10 +18,12 @@ add_executable(vr-salient
     src/vulkanheadless.cpp
 )
 
+option(SLIDERS "Enable slider controls to change model settings on-the-fly." OFF)
 
 set_target_properties(vr-salient PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_compile_options(vr-salient PRIVATE
   $<$<COMPILE_LANGUAGE:CUDA>: --extended-lambda >
+  $<$<BOOL:${SLIDERS}>: -DSLIDERS >
 )
 
 # Copy static content: SPIR-V shader code and depth camera settings
