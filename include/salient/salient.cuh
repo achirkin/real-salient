@@ -691,8 +691,7 @@ namespace salient
         const int lhood_w, const int lhood_h,
         const float alpha,
         float *out_probs, float *prev_probs,
-        cudaTextureObject_t lhoodTex,
-        int8_t *labels)
+        cudaTextureObject_t lhoodTex)
     {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
         const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -701,16 +700,11 @@ namespace salient
         float dx = (float)lhood_w / (float)probs_w;
         float dy = (float)lhood_h / (float)probs_h;
         int ix = i + probs_w * j;
-        int8_t label = labels[(int)(floorf(dx * i) + lhood_w * floorf(dy * j))];
-        if (label >= 0)
-            out_probs[ix] = label == SALIENT_FOREGROUND ? 1.0f : 0.0f;
-        else
-        {
-            float2 lhood = tex2D<float2>(lhoodTex, dx * i, dy * j);
-            lhood.x = expf(lhood.x);
-            lhood.y = expf(lhood.y);
-            out_probs[ix] = alpha * min(1.0f, max(0.0f, lhood.x / max(0.000001, lhood.x + lhood.y))) + (1.0f - alpha) * prev_probs[ix];
-        }
+        float2 lhood = tex2D<float2>(lhoodTex, dx * i, dy * j);
+        lhood.x = expf(lhood.x);
+        lhood.y = expf(lhood.y);
+        float p = min(1.0f, max(0.0f, lhood.x / max(0.000001, lhood.x + lhood.y)));
+        out_probs[ix] = alpha * p + (1.0f - alpha) * prev_probs[ix];
     }
 
     template <int C, int GaussianK, class GetFeature>
@@ -725,7 +719,7 @@ namespace salient
         cudaMemcpyToArrayAsync(lhoodArray, 0, 0, lhoodPtr, sizeof(float) * 2 * W * H, cudaMemcpyDeviceToDevice, mainStream);
         cudaErrorCheck(mainStream);
         compute_probabilities<<<distribute(dimColor, squareBlockSize), squareBlockSize, 0, mainStream>>>(
-            color_W, color_H, W, H, analysisSettings.timeAlpha, probabilities_prev, probabilities, lhoodTex, gmmModel.labelsPtr());
+            color_W, color_H, W, H, analysisSettings.timeAlpha, probabilities_prev, probabilities, lhoodTex);
         cudaErrorCheck(mainStream);
         // NB: without device-to-host synchronisation this function may return before the new probabilites are calculated.
         std::swap(probabilities_prev, probabilities);
