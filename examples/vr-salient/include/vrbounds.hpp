@@ -1,6 +1,6 @@
 #pragma once
 #include <openvr.h>
-#include "salient/salient.cuh"
+#include "salient/salient_structs.hpp"
 
 template <class Vertex>
 class VrBounds
