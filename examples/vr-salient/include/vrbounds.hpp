@@ -1,4 +1,6 @@
 #pragma once
+
+#include <iostream>
 #include <openvr.h>
 #include "salient/salient_structs.hpp"
 
@@ -11,7 +13,6 @@ public:
 private:
     const salient::CameraIntrinsics colorIntr;
     const salient::CameraExtrinsics color2tracker;
-    salient::CameraExtrinsics world2color;
     vr::IVRSystem *m_pHMD;
     vr::TrackedDevicePose_t devicePositions[vr::k_unMaxTrackedDeviceCount];
 
@@ -22,7 +23,6 @@ private:
     float trackedDevDists[vr::k_unMaxTrackedDeviceCount];
     int trackedDevXYs[vr::k_unMaxTrackedDeviceCount * 2];
     int deviceCount;
-    const float near, far;
 
     salient::SceneBounds boundPoints()
     {
@@ -68,6 +68,9 @@ private:
     };
 
 public:
+    const float near, far;
+
+    salient::CameraExtrinsics world2color;
     float mvpMatrix[16];
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;

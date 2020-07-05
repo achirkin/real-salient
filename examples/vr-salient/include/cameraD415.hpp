@@ -1,5 +1,6 @@
 #pragma once
 
+#include <iostream>
 #include <chrono>
 #include <thread>
 #include <librealsense2/rs.hpp>

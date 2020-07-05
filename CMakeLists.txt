@@ -17,4 +17,7 @@ option(BUILD_EXAMPLES "Build example executables.")
 
 if(BUILD_EXAMPLES)
 	add_subdirectory (examples/vr-salient)
+	if(WIN32)
+		add_subdirectory (examples/saber-salient)
+	endif()
 endif()
