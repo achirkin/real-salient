@@ -68,7 +68,7 @@ The VR tricks are optional in this example.
 
 ### saber-salient
 
-`saber-salient` is a dynamic library to be used in a BeatSaber plugin.
+`saber-salient` is a dynamic library to be used in my [BeatSaber plugin](https://github.com/achirkin/CameraPlus).
 It functions the same as `vr-salient`, but does not require `OpenCV` and requires VR tracking.
 
 
