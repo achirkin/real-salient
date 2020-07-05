@@ -71,6 +71,10 @@ The VR tricks are optional in this example.
 `saber-salient` is a dynamic library to be used in my [BeatSaber plugin](https://github.com/achirkin/CameraPlus).
 It functions the same as `vr-salient`, but does not require `OpenCV` and requires VR tracking.
 
+#### Demo videos:
+
+- [360° Reason for Living by Morgan Page](https://youtu.be/1GdDrsxVWYE)
+- [360° First of the Year (Equinox) by Skrillex](https://youtu.be/0zMn-zVGNNc)
 
 ## References
 
