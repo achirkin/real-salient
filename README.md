@@ -40,13 +40,37 @@ who used [Miguel Monteiro's](https://github.com/MiguelMonteiro/permutohedral_lat
 implementation of fast gaussian filtering.
 The theory for this implementation can be found in [[2]](#2) and [[3]](#3).
 
-### Example
+## Examples
 
-The `main.cu` program uses an Intel RealSense D415 camera and its SDK to
-capture a color+depth video stream.
-It also uses OpenCV - only to display the window.
+The examples make use of the core `real-salient` as well as of couple VR-related tricks.
+They are hardcoded to use the Intel RealSense D415 camera and its SDK to
+capture a color+depth video stream (`examples/vr-salient/include/cameraD415.hpp`).
 
-   ___TODO: video is coming soon___
+__VR bounds:__
+The examples use [OpenVR](https://github.com/ValveSoftware/openvr) to improve the initial guess
+of the salient object position (step 2 in the algorithm above).
+I attach an extra tracker to the depth camera to locate its position in VR.
+This allows me to find the position of the headset and hand controllers on the image via a simple coordinate transform.
+This is implemented in `examples/vr-salient/include/vrbounds.hpp`.
+
+__VR depth stencil:__
+In addition to the tracker positions, I employ a `Vulkan+OpenVR` combination to render the VR shaperone bounds
+into a temporary buffer.
+This allows me to cut-off all objects outside the user-defined play area from the scene.
+This is implemented in `examples/vr-salient/include/vulkanheadless.hpp`.
+ 
+
+### vr-salient
+
+`vr-salient` is a standalone program.
+In addition to the tweaks above, it uses OpenCV highgui library - only to display the window.
+The VR tricks are optional in this example.
+
+### saber-salient
+
+`saber-salient` is a dynamic library to be used in a BeatSaber plugin.
+It functions the same as `vr-salient`, but does not require `OpenCV` and requires VR tracking.
+
 
 ## References
 
