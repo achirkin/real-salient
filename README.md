@@ -73,8 +73,12 @@ It functions the same as `vr-salient`, but does not require `OpenCV` and require
 
 #### Demo videos:
 
-- [360° Reason for Living by Morgan Page](https://youtu.be/1GdDrsxVWYE)
-- [360° First of the Year (Equinox) by Skrillex](https://youtu.be/0zMn-zVGNNc)
+[<img src="examples/saber-salient/img/screen-1.jpg?raw=true" width="260" alt="360° Reason for Living by Morgan Page" title="360° Reason for Living by Morgan Page"/>](https://youtu.be/1GdDrsxVWYE)
+
+[<img src="examples/saber-salient/img/screen-2.jpg?raw=true" width="260" alt="360° First of the Year (Equinox) by Skrillex" title="360° First of the Year (Equinox) by Skrillex"/>](https://youtu.be/0zMn-zVGNNc)
+
+
+
 
 ## References
 
